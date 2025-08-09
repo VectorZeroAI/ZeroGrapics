@@ -11,7 +11,7 @@ This graphics engine uses SQLite DB to store Vector styled data, and a coordinat
 
 #architecture:
 
-Init.py
+ZeroInit.py
 
 Spawns the custom SQLite DB with a custom struckture.
 
@@ -71,7 +71,7 @@ SHADERS
 
 ---
 
-Interpriter.py
+ZeroInterpriter.py
 
 Exposes the funktions used to comunicate with the DB system.
 
@@ -91,6 +91,27 @@ Exposes funktions:
 
 ---
 
-Engine.py
+ZeroEngine.py
 
 Uses Interpriter.py to read the DBs and renders the pictures.
+
+---
+
+Zerofiller.py
+
+Gets a .txt or .json data from an LLM and fills the numbers into the SQLite DB.
+
+Has a parser and a format defined.
+
+Format:
+TABLE1:
+ROW1: COLUM1: {x;y;z};COLUM2: {x};COLUM3:{x;y;z;...};COLUM4: {[x;y;z];[a;b;c];...}
+ROW2:...
+ROW...
+
+TABLE2:
+ROW1: COLUM1: {x;y};COLUM2: {x;y;z;...};COLUM3: {x};COLUM4: {x;y;z};COLUM5: {x};COLUM6: {x;y;z;...};COLUM7: {[x;y([x;y];[x;y;z])];...}
+ROW...
+
+TABLE3:
+ROW1:COLUM1:{x};COLUM2:{x;y};COLUM3:{x;y;z};COLUM4:{x};COLUM5:{(x;y;[{x;y;z};{x};{x};{x;y;z}]);...};
