@@ -95,6 +95,12 @@ ZeroEngine.py
 
 Uses Interpriter.py to read the DBs and renders the pictures.
 
+Internaly constructs a Coordinate System where all the points are inputed, to compute the curved via pull point lines before giving them to rendering library.
+
+The pull is calculated via this formula: 
+B(t) = (1-t)^2 P_0 + 2(1-t) t P_c + t^2 P_1, \quad t \in [0,1]
+
+and the amount of points is the distanse between the 3 points that form the curve.
 ---
 
 Zerofiller.py
