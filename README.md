@@ -27,7 +27,7 @@ ROW1: COLUM1: {x;y};COLUM2: {x;y;z;...};COLUM3: {x};COLUM4: {x;y;z};COLUM5: {x};
 ROW...
 
 TABLE3:
-ROW1:COLUM1:{x};COLUM2:{x;y};COLUM3:{x;y;z};COLUM4:{x};COLUM5:{(x;y;[{x;y;z};{x}]);...};
+ROW1:COLUM1:{x};COLUM2:{x;y};COLUM3:{x;y;z};COLUM4:{x};COLUM5:{(x;y;[{x;y;z};{x};{x};{x;y;z}]);...};
 
 
 In table 1, each row represents a point, and all the colums are used to describe the point. 
@@ -53,6 +53,8 @@ Colum 2 has a vector of 2 numbers, wich are UUIDs of points that the line is dra
 Colum 3 has a vector describing the coordinates of the "pull point" of the line.
 Colum 4 describes how hard the point pulls.
 Colum 5 describes the changes. It does so in this way: {[time before the change;the duration of change;the new values for changeable parameters];[...]...}
+Colum 6 has the thickness of line as one number
+Colum 7 has the color of line in a vector of 3 numbers.
 
 
 
@@ -63,7 +65,8 @@ Config.py
 Has all the values in it.
 
 Values:
-
+CAMERA_POSITION
+SHADERS
 
 
 ---
@@ -90,4 +93,4 @@ Exposes funktions:
 
 Engine.py
 
-Renders everything, i guess? (I kinda want to change that but also dont know how too 🥲)
+Uses Interpriter.py to read the DBs and renders the pictures.
