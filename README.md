@@ -17,6 +17,9 @@ Spawns the custom SQLite DB with a custom struckture.
 
 Struckture:
 
+TABLE1:
+
+ROW1: COLUM1:{x;y;z}
 
 
 ---
