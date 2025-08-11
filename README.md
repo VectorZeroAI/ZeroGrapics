@@ -69,6 +69,7 @@ Config.py
 Has all the values in it.
 
 Values:
+DB_NAME
 CAMERA_POSITION
 SHADERS
 LINE_THIKNESS
