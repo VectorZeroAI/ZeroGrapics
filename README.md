@@ -17,45 +17,49 @@ Spawns the custom SQLite DB with a custom struckture.
 
 Struckture:
 
-TABLE1:
-ROW1: COLUM1: {x;y;z};COLUM2: {x};COLUM3:{x;y;z;...};COLUM4: {[x;y;z];[a;b;c];...}
-ROW2:...
-ROW...
-
-TABLE2:
-ROW1: COLUM1: {x;y};COLUM2: {x;y;z;...};COLUM3: {x};COLUM4: {x;y;z};COLUM5: {x};COLUM6: {x;y;z;...};COLUM7: {[x;y([x;y];[x;y;z])];...}
-ROW...
-
-TABLE3:
-ROW1:COLUM1:{x};COLUM2:{x;y};COLUM3:{x;y;z};COLUM4:{x};COLUM5:{(x;y;[{x;y;z};{x};{x};{x;y;z}]);...};
-
-
-In table 1, each row represents a point, and all the colums are used to describe the point. 
+In table 1, each row represents a point, and all the colums are used to describe the point.
 Colum1 has a vector of 3 numbers and represents the coordinates of point.
 Colum2 has a UUID for the point.
-Colum3 has a vector of all the UUIDs of the points to wich a line shall be drawn.
-Colum4 has the movements of the node encrypted in it via a list of vectors, each having 3 numbers and representing one movement.
+Colum3 has a vector of all the UUIDs of the points to wich a line shall be drawn to.
+Colum4 has the movements of the point in a json format.
+
+The movements are saved this way:
+{(x;y;[a;b;c]);...}
+whereby:
+x is the wait time in ms.
+y is the duration of the change
+[a;b;c] are the new coordinates of the point
 
 
-TABLE2 --> FACES IS NOT YET READY! IGNORE FOR NOW!
+TABLE2 --> LINES:
 
-In table 2, each row represents a face, and all the colums are used to describe the shape.
-Colum1 has a vector with 2 numbers in it, and they describe in wich direction the shape is facing.
-Colum2 has a vector 
-Colum3 has a binary in it, that decribes whether the face is a figure with points as edges of it, or custom fluidly tunable figure. 0 means a fill out, meaning that colums 5 and 6 are ignored.
+Each row describes a new line.
+
+Colum 1: the UUID of the line
+Colum 2: a vector of 2 uuids of the points wich are the lines endpoints. 
+Colum 3: a vector of 3 numbers that are the coordinates of the pull point.
+Colum 4: has a number that tells power of the pull point.
+Colum 5: has a json representing changes to the lines. It is encoded that way:
+{(x;y;[a;b;c];d);...}
+Whereby:
+x is the waittime
+y is the duration of the change.
+[a;b;c] are the new coordinates of the pullpoint
+d is the new pullpoint power
 
 
+Table 3 --> Shapes
 
-Table 3, lines.
-
-Each line is asigned a UUID, and it is saved in colum 1. 
-Colum 2 has a vector of 2 numbers, wich are UUIDs of points that the line is drawn from and to.
-Colum 3 has a vector describing the coordinates of the "pull point" of the line.
-Colum 4 describes how hard the point pulls.
-Colum 5 describes the changes. It does so in this way: {[time before the change;the duration of change;the new values for changeable parameters];[...]...}
-Colum 6 has the thickness of line as one number
-Colum 7 has the color of line in a vector of 3 numbers.
-
+Colum 1: Is the vector of all the uuids of all the points in the shape.
+Colum 2:Is the vector of all the uuids of all the lines in the shape.
+Colum 3: Is the vector of 3 numbers representing the fill color.
+Colum 4: is a json where the changes are saved.
+They are saved this way:
+{(x;y;[a;b;c]);...}
+Whereby:
+x is wait time
+y is the duration of the change
+[a;b;c are the new color representing numbers]
 
 
 ---
@@ -67,6 +71,8 @@ Has all the values in it.
 Values:
 CAMERA_POSITION
 SHADERS
+LINE_THIKNESS
+LINE_COLOR
 
 
 ---
@@ -76,6 +82,8 @@ ZeroInterpriter.py
 Exposes the funktions used to comunicate with the DB system.
 
 Exposes funktions:
+
+"construct_the_model"
 
 "read.points"
 
@@ -88,6 +96,10 @@ Exposes funktions:
 "read.movements.points"
 
 "read.movements.shapes"
+
+"read.full(tick_in_ms)"
+
+read.full(tick_in_ms) returns the state that should be rendered in that exact ms. 
 
 ---
 
@@ -109,15 +121,6 @@ Gets a .txt or .json data from an LLM and fills the numbers into the SQLite DB.
 
 Has a parser and a format defined.
 
-Format:
+FORMAT:
 TABLE1:
-ROW1: COLUM1: {x;y;z};COLUM2: {x};COLUM3:{x;y;z;...};COLUM4: {[x;y;z];[a;b;c];...}
-ROW2:...
-ROW...
-
-TABLE2:
-ROW1: COLUM1: {x;y};COLUM2: {x;y;z;...};COLUM3: {x};COLUM4: {x;y;z};COLUM5: {x};COLUM6: {x;y;z;...};COLUM7: {[x;y([x;y];[x;y;z])];...}
-ROW...
-
-TABLE3:
-ROW1:COLUM1:{x};COLUM2:{x;y};COLUM3:{x;y;z};COLUM4:{x};COLUM5:{(x;y;[{x;y;z};{x};{x};{x;y;z}]);...};
+ROW1:COLUM1:
