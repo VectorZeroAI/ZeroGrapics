@@ -40,7 +40,7 @@ Colum 2: a vector of 2 uuids of the points wich are the lines endpoints.
 Colum 3: a vector of 3 numbers that are the coordinates of the pull point.
 Colum 4: has a number that tells power of the pull point.
 Colum 5: has a json representing changes to the lines. It is encoded that way:
-{(x;y;[a;b;c];d);...}
+{(x;y;[a;b;c;d]);...}
 Whereby:
 x is the waittime
 y is the duration of the change.
@@ -123,4 +123,14 @@ Has a parser and a format defined.
 
 FORMAT:
 TABLE1:
-ROW1:COLUM1:
+ROW1:COLUM1:{x;y;z};COLUM2:{x};COLUM3:{x;y;...};COLUM4:{(x;y;[x;y;z]);...}
+ROW2...
+...
+
+TABLE2:
+ROW1:COLUM1:{x};COLUM2:{x;y};COLUM3:{x;y;z};COLUM4:{x};COLUM5:{(x;y;[a;b;c;d]);...}
+ROW2...
+...
+
+TABLE3:
+ROW1:COLUM1:{x;y;z;...};COLUM2:{x;y;z;...};COLUM3:{x;y;z};COLUM4:{(x;y;[a;b;c]);...}
