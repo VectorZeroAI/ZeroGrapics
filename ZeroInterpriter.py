@@ -392,7 +392,7 @@ class ZeroInterpreter:
         self.lines = {}    # uuid -> { endpoints: [u1,u2], pull_base: (x,y,z), power_base: float, changes: [...] }
         self.shapes = {}   # uuid -> { points: [...], lines: [...], fill_base: (r,g,b), color_changes: [...] }
         self._load_all()
-    
+
     def _load_all(self):
         """Load all data from database into memory structures"""
         cur = self.conn.cursor()
@@ -414,7 +414,7 @@ class ZeroInterpreter:
                     print(f"Warning: skipping malformed point {r.get('uuid', 'unknown')}: {e}")
         except sqlite3.OperationalError:
             print("Warning: points table not found or invalid structure")
-        
+
         # Load lines
         try:
             rows = cur.execute("SELECT uuid, endpoints, pull_point, pull_power, movements FROM lines").fetchall()
@@ -435,7 +435,7 @@ class ZeroInterpreter:
                     print(f"Warning: skipping malformed line {r.get('uuid', 'unknown')}: {e}")
         except sqlite3.OperationalError:
             print("Warning: lines table not found or invalid structure")
-        
+
         # Load shapes
         try:
             rows = cur.execute("SELECT uuid, point_uuids, line_uuids, color, movements FROM shapes").fetchall()
@@ -456,7 +456,7 @@ class ZeroInterpreter:
                     print(f"Warning: skipping malformed shape {r.get('uuid', 'unknown')}: {e}")
         except sqlite3.OperationalError:
             print("Warning: shapes table not found or invalid structure")
-    
+
     # ----------------------
     # compute point position at tick
     # ----------------------
@@ -486,7 +486,7 @@ class ZeroInterpreter:
             progress = (tick_ms - start) / dur
             return lerp_vec(current, target, clamp(progress))
         return current
-    
+
     # ----------------------
     # compute pull point and power at tick for a line
     # ----------------------
@@ -518,7 +518,7 @@ class ZeroInterpreter:
             curpow = lerp(current_power, new_power, clamp(progress))
             return curp, curpow
         return current_pos, current_power
-    
+
     # ----------------------
     # compute shape color at tick
     # ----------------------
@@ -548,7 +548,7 @@ class ZeroInterpreter:
                 lerp(current[2], newcol[2], clamp(progress))
             )
         return current
-    
+
     # ----------------------
     # Public: build full frame
     # ----------------------
@@ -561,7 +561,7 @@ class ZeroInterpreter:
                 point_positions[uuid] = self.point_position_at(uuid, tick_in_ms)
             except KeyError:
                 continue  # Skip missing points
-        
+
         # 2) Compute lines
         lines_out = []
         for uuid, rec in self.lines.items():
@@ -587,7 +587,7 @@ class ZeroInterpreter:
                 "pull_power": pull_power,
                 "samples": samples
             })
-        
+
         # 3) Compute shapes
         shapes_out = []
         for uuid, rec in self.shapes.items():
@@ -611,10 +611,10 @@ class ZeroInterpreter:
                 "triangles": triangles,
                 "color": color
             })
-        
+
         # 4) Prepare points list
         points_out = [{"uuid": u, "pos": pos} for u, pos in point_positions.items()]
-        
+
         return {
             "timestamp_ms": tick_in_ms,
             "points": points_out,
@@ -633,7 +633,7 @@ def _example_in_memory_db():
     cur.execute("CREATE TABLE points(uuid TEXT PRIMARY KEY, coordinates TEXT NOT NULL, connected_points TEXT, movements TEXT)")
     cur.execute("CREATE TABLE lines(uuid TEXT PRIMARY KEY, endpoints TEXT NOT NULL, pull_point TEXT NOT NULL, pull_power REAL NOT NULL, movements TEXT)")
     cur.execute("CREATE TABLE shapes(uuid TEXT PRIMARY KEY, point_uuids TEXT NOT NULL, line_uuids TEXT NOT NULL, color TEXT NOT NULL, movements TEXT)")
-    
+
     # Insert sample points
     cur.execute("INSERT INTO points VALUES(?, ?, ?, ?)",
                 ("A", json.dumps([0.0,0.0,0.0]), json.dumps(["B"]), json.dumps([[0, 1000, [0.0, 1.0, 0.0]]])))
@@ -641,16 +641,16 @@ def _example_in_memory_db():
                 ("B", json.dumps([2.0,0.0,0.0]), json.dumps(["A"]), json.dumps([[500, 1000, [2.0, 1.0, 0.0]]])))
     cur.execute("INSERT INTO points VALUES(?, ?, ?, ?)",
                 ("C", json.dumps([1.0, 0.5, 0.0]), json.dumps([]), None))
-    
+
     # Insert sample line
     cur.execute("INSERT INTO lines VALUES(?, ?, ?, ?, ?)",
                 ("L1", json.dumps(["A","B"]), json.dumps([1.0, 1.0, 1.5]), 1.0, 
                  json.dumps([[0, 1000, [1.0, 1.0, 1.5]]])))
-    
+
     # Insert sample shape
     cur.execute("INSERT INTO shapes VALUES(?, ?, ?, ?, ?)",
                 (json.dumps(["A","B","C"]), json.dumps(["L1"]), json.dumps([0.2,0.7,0.3]), None))
-    
+
     conn.commit()
     return conn
 
