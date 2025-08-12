@@ -3,7 +3,7 @@ ZeroInterpreter.py
 - Connects to an SQLite DB with the tables:
   points(uuid TEXT, coordinates TEXT, connected_points TEXT, movements TEXT)
   lines(uuid TEXT, endpoints TEXT, pull_point TEXT, pull_power REAL, movements TEXT)
-  shapes(point_uuids TEXT, line_uuids TEXT, color TEXT, movements TEXT)
+  shapes(uuid TEXT, point_uuids TEXT, line_uuids TEXT, color TEXT, movements TEXT)  # FIXED: Added uuid
 - Supports two field formats:
   * JSON-like arrays:  [x,y,z]  or  [[...],...]
   * semicolon-separated: "x;y;z"  or  "(x;y;[a;b;c]);..." etc.
@@ -414,7 +414,7 @@ class ZeroInterpreter:
                     print(f"Warning: skipping malformed point {r.get('uuid', 'unknown')}: {e}")
         except sqlite3.OperationalError:
             print("Warning: points table not found or invalid structure")
-
+        
         # Load lines
         try:
             rows = cur.execute("SELECT uuid, endpoints, pull_point, pull_power, movements FROM lines").fetchall()
@@ -435,13 +435,13 @@ class ZeroInterpreter:
                     print(f"Warning: skipping malformed line {r.get('uuid', 'unknown')}: {e}")
         except sqlite3.OperationalError:
             print("Warning: lines table not found or invalid structure")
-
-        # Load shapes
+        
+        # Load shapes (FIXED: Now correctly uses uuid column)
         try:
             rows = cur.execute("SELECT uuid, point_uuids, line_uuids, color, movements FROM shapes").fetchall()
             for r in rows:
                 try:
-                    uuid = str(r["uuid"])
+                    uuid = str(r["uuid"])  # FIXED: Now properly getting uuid
                     pts = parse_uuid_list(r["point_uuids"])
                     lns = parse_uuid_list(r["line_uuids"])
                     fill = tuple(parse_vectorN(r["color"])[:3]) if r["color"] is not None else (1.0, 1.0, 1.0)
@@ -561,7 +561,7 @@ class ZeroInterpreter:
                 point_positions[uuid] = self.point_position_at(uuid, tick_in_ms)
             except KeyError:
                 continue  # Skip missing points
-
+        
         # 2) Compute lines
         lines_out = []
         for uuid, rec in self.lines.items():
@@ -574,9 +574,21 @@ class ZeroInterpreter:
             p0 = point_positions[u0]
             p1 = point_positions[u1]
             pull_point, pull_power = self.line_pull_at(uuid, tick_in_ms)
-            # Sample the Bézier curve
-            n_samples = sample_count_for_curve(p0, pull_point, p1)
-            samples = sample_quadratic_bezier(p0, pull_point, p1, n_samples)
+            
+            # FIXED: Implement pull_power to scale control point influence
+            # Calculate midpoint
+            mid = ((p0[0] + p1[0])/2, (p0[1] + p1[1])/2, (p0[2] + p1[2])/2)
+            # Calculate offset from midpoint to pull_point
+            offset = (pull_point[0] - mid[0], pull_point[1] - mid[1], pull_point[2] - mid[2])
+            # Scale offset by pull_power
+            scaled_offset = (offset[0] * pull_power, offset[1] * pull_power, offset[2] * pull_power)
+            # Calculate effective control point
+            effective_pc = (mid[0] + scaled_offset[0], mid[1] + scaled_offset[1], mid[2] + scaled_offset[2])
+            
+            # Sample the Bézier curve using effective control point
+            n_samples = sample_count_for_curve(p0, effective_pc, p1)
+            samples = sample_quadratic_bezier(p0, effective_pc, p1, n_samples)
+            
             lines_out.append({
                 "uuid": uuid,
                 "from_uuid": u0,
@@ -587,7 +599,7 @@ class ZeroInterpreter:
                 "pull_power": pull_power,
                 "samples": samples
             })
-
+        
         # 3) Compute shapes
         shapes_out = []
         for uuid, rec in self.shapes.items():
@@ -611,10 +623,9 @@ class ZeroInterpreter:
                 "triangles": triangles,
                 "color": color
             })
-
+        
         # 4) Prepare points list
         points_out = [{"uuid": u, "pos": pos} for u, pos in point_positions.items()]
-
         return {
             "timestamp_ms": tick_in_ms,
             "points": points_out,
@@ -633,7 +644,6 @@ def _example_in_memory_db():
     cur.execute("CREATE TABLE points(uuid TEXT PRIMARY KEY, coordinates TEXT NOT NULL, connected_points TEXT, movements TEXT)")
     cur.execute("CREATE TABLE lines(uuid TEXT PRIMARY KEY, endpoints TEXT NOT NULL, pull_point TEXT NOT NULL, pull_power REAL NOT NULL, movements TEXT)")
     cur.execute("CREATE TABLE shapes(uuid TEXT PRIMARY KEY, point_uuids TEXT NOT NULL, line_uuids TEXT NOT NULL, color TEXT NOT NULL, movements TEXT)")
-
     # Insert sample points
     cur.execute("INSERT INTO points VALUES(?, ?, ?, ?)",
                 ("A", json.dumps([0.0,0.0,0.0]), json.dumps(["B"]), json.dumps([[0, 1000, [0.0, 1.0, 0.0]]])))
@@ -641,16 +651,13 @@ def _example_in_memory_db():
                 ("B", json.dumps([2.0,0.0,0.0]), json.dumps(["A"]), json.dumps([[500, 1000, [2.0, 1.0, 0.0]]])))
     cur.execute("INSERT INTO points VALUES(?, ?, ?, ?)",
                 ("C", json.dumps([1.0, 0.5, 0.0]), json.dumps([]), None))
-
     # Insert sample line
     cur.execute("INSERT INTO lines VALUES(?, ?, ?, ?, ?)",
                 ("L1", json.dumps(["A","B"]), json.dumps([1.0, 1.0, 1.5]), 1.0, 
                  json.dumps([[0, 1000, [1.0, 1.0, 1.5]]])))
-
-    # Insert sample shape
+    # Insert sample shape (FIXED: Added uuid)
     cur.execute("INSERT INTO shapes VALUES(?, ?, ?, ?, ?)",
-                (json.dumps(["A","B","C"]), json.dumps(["L1"]), json.dumps([0.2,0.7,0.3]), None))
-
+                ("S1", json.dumps(["A","B","C"]), json.dumps(["L1"]), json.dumps([0.2,0.7,0.3]), None))
     conn.commit()
     return conn
 
