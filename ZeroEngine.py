@@ -1,10 +1,11 @@
+#ZeroEngine.py
 """
 ZeroEngine.py - improved rendering for ZeroGraphics
 Features:
  - Uses VBOs (glGenBuffers / glBufferData) for lines and triangles (shapes)
  - Renders points efficiently with GL_POINTS (fast) using a single vertex array
  - Reuses buffers between frames to avoid allocations
- - Camera: orbit (mouse drag), forward/back (scroll or W/S), pan (A/D, arrow keys)
+ - Camera: orbit (mouse drag), forward/back (scroll or W/S), pan (A/D, arrow keys, right mouse drag)
  - Minimal immediate-mode usage (only for debug / fallback)
 """
 import sys
@@ -54,6 +55,7 @@ class ZeroEngine:
         self.camera_up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
         # Input state
         self.mouse_orbiting = False
+        self.mouse_panning = False  # FIXED: Added mouse panning state
         self.last_mouse = (0, 0)
         # GL setup
         self.setup_opengl()
@@ -114,7 +116,8 @@ class ZeroEngine:
                 if event.button == 1:  # left click -> start orbit
                     self.mouse_orbiting = True
                     self.last_mouse = pygame.mouse.get_pos()
-                elif event.button == 3:  # right click -> pan
+                elif event.button == 3:  # right click -> pan (FIXED: Now sets state)
+                    self.mouse_panning = True
                     self.last_mouse = pygame.mouse.get_pos()
                 elif event.button == 4:  # wheel up -> zoom in
                     self.cam_distance = max(0.01, self.cam_distance * 0.9)
@@ -123,37 +126,40 @@ class ZeroEngine:
             elif event.type == MOUSEBUTTONUP:
                 if event.button == 1:
                     self.mouse_orbiting = False
+                elif event.button == 3:  # right click release (FIXED: Now clears state)
+                    self.mouse_panning = False
+        
         # keyboard camera controls (W/S forward/back, A/D left/right, arrows pan)
         keys = pygame.key.get_pressed()
         move_speed = 0.05 * (self.cam_distance + 1.0)
+        
+        # FIXED: W/S now move the camera instead of the target
         if keys[K_w] or keys[K_UP]:
-            # move target forward along view direction
-            cam_pos = self.camera_position()
-            forward = (self.camera_target - cam_pos)
-            forward = forward / (np.linalg.norm(forward) + 1e-9)
-            self.camera_target += forward * move_speed
+            self.cam_distance = max(0.01, self.cam_distance - move_speed)
             moved = True
         if keys[K_s] or keys[K_DOWN]:
-            cam_pos = self.camera_position()
-            forward = (self.camera_target - cam_pos)
-            forward = forward / (np.linalg.norm(forward) + 1e-9)
-            self.camera_target -= forward * move_speed
+            self.cam_distance += move_speed
             moved = True
+        
+        # Strafing (A/D)
         if keys[K_a]:
             # strafe left
             cam_pos = self.camera_position()
             forward = (self.camera_target - cam_pos)
-            left = np.cross(self.camera_up, forward)
-            left = left / (np.linalg.norm(left) + 1e-9)
-            self.camera_target += left * move_speed
+            forward = forward / (np.linalg.norm(forward) + 1e-9)
+            right = np.cross(forward, self.camera_up)
+            right = right / (np.linalg.norm(right) + 1e-9)
+            self.camera_target -= right * move_speed
             moved = True
         if keys[K_d]:
             cam_pos = self.camera_position()
             forward = (self.camera_target - cam_pos)
-            left = np.cross(self.camera_up, forward)
-            left = left / (np.linalg.norm(left) + 1e-9)
-            self.camera_target -= left * move_speed
+            forward = forward / (np.linalg.norm(forward) + 1e-9)
+            right = np.cross(forward, self.camera_up)
+            right = right / (np.linalg.norm(right) + 1e-9)
+            self.camera_target += right * move_speed
             moved = True
+        
         # mouse orbiting
         if self.mouse_orbiting:
             mx, my = pygame.mouse.get_pos()
@@ -167,6 +173,31 @@ class ZeroEngine:
             self.cam_phi = max(-math.pi/2 + 0.01, min(math.pi/2 - 0.01, self.cam_phi))
             self.last_mouse = (mx, my)
             moved = True
+        
+        # mouse panning (FIXED: Implemented full panning logic)
+        if self.mouse_panning:
+            mx, my = pygame.mouse.get_pos()
+            lx, ly = self.last_mouse
+            dx = mx - lx
+            dy = my - ly
+            
+            # Calculate movement vectors
+            cam_pos = self.camera_position()
+            forward = (self.camera_target - cam_pos)
+            forward = forward / (np.linalg.norm(forward) + 1e-9)
+            right = np.cross(forward, self.camera_up)
+            right = right / (np.linalg.norm(right) + 1e-9)
+            up = np.cross(right, forward)
+            up = up / (np.linalg.norm(up) + 1e-9)
+            
+            # Move camera target
+            move_scale = 0.01 * self.cam_distance
+            self.camera_target += right * dx * move_scale
+            self.camera_target += up * dy * move_scale
+            
+            self.last_mouse = (mx, my)
+            moved = True
+            
         return True
     
     # --------------------
@@ -259,6 +290,7 @@ class ZeroEngine:
         else:
             pts_np = np.zeros((0, 3), dtype=np.float32)
         self.upload_points(pts_np)
+        
         # Lines: we flatten samples for all lines into single array and store segments
         lines = frame.get("lines", [])
         segments = []
@@ -278,6 +310,7 @@ class ZeroEngine:
         else:
             lines_np = np.zeros((0, 3), dtype=np.float32)
         self.upload_lines(lines_np, segments)
+        
         # Shapes: pack triangles sequentially, but we must set color per-triangle.
         # We'll prepare a single packed vertex buffer and keep a parallel color list for shapes.
         shapes = frame.get("shapes", [])
@@ -314,10 +347,13 @@ class ZeroEngine:
         gluLookAt(cam_pos[0], cam_pos[1], cam_pos[2],
                   self.camera_target[0], self.camera_target[1], self.camera_target[2],
                   self.camera_up[0], self.camera_up[1], self.camera_up[2])
+        
         # Draw points
         self.draw_points(cfg("POINT_COLOR"))
+        
         # Draw lines (batches)
         self.draw_lines(cfg("LINE_COLOR"))
+        
         # Draw shapes: since shapes can have different colors, we iterate shapes_colors and draw ranges
         if hasattr(self, "_shapes_colors") and self.shape_tri_count > 0:
             glBindBuffer(GL_ARRAY_BUFFER, self.vbo_shapes)
@@ -328,6 +364,7 @@ class ZeroEngine:
                 glDrawArrays(GL_TRIANGLES, start, count)
             glDisableClientState(GL_VERTEX_ARRAY)
             glBindBuffer(GL_ARRAY_BUFFER, 0)
+        
         pygame.display.flip()
     
     # --------------------
@@ -343,12 +380,16 @@ class ZeroEngine:
             self.last_time = current_time
             if not self.paused:
                 self.current_tick += dt
+            
             # read frame from interpreter
             frame = self.interpreter.read_full(self.current_tick)
+            
             # convert and upload to GPU
             self.prepare_frame_gpu(frame)
+            
             # render
             self.render_frame(frame)
+            
             # debug caption
             pygame.display.set_caption(
                 f"ZeroEngine | Time: {self.current_tick}ms | Points: {len(frame.get('points',[]))} | "
@@ -356,6 +397,7 @@ class ZeroEngine:
                 f"{'PAUSED' if self.paused else 'PLAYING'}"
             )
             self.clock.tick(self.target_fps)
+        
         pygame.quit()
 
 if __name__ == "__main__":
