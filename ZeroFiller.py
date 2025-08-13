@@ -1,21 +1,18 @@
-# ZeroFiller.py
+#ZeroFiller.py
 """
 ZeroFiller.py
 - Reads LLM-generated .txt or .json that describes points, lines and shapes.
 - Parses the input (JSON preferred) or a legacy brace-based text format.
 - Validates fields and inserts rows into the SQLite DB produced by ZeroInit.py.
-
 Schema expected (graphics.db created by ZeroInit.py):
-  points(coords TEXT, uuid TEXT PRIMARY KEY, connected_points TEXT, movements TEXT)
+  points(coordinates TEXT, uuid TEXT PRIMARY KEY, connected_points TEXT, movements TEXT)
   lines(uuid TEXT PRIMARY KEY, endpoints TEXT, pull_point TEXT, pull_power REAL, movements TEXT)
-  shapes(point_uuids TEXT, line_uuids TEXT, color TEXT, movements TEXT)
-
+  shapes(uuid TEXT PRIMARY KEY, point_uuids TEXT, line_uuids TEXT, color TEXT, movements TEXT)  # FIXED: Added uuid
 Notes:
  - Movements / changes are saved to the DB as JSON strings (arrays) when possible.
  - Coordinates/colors are saved as JSON arrays [x,y,z].
  - For legacy semicolon formats the parser attempts to convert to normalized JSON storage.
 """
-
 import argparse
 import sqlite3
 import json
@@ -24,7 +21,6 @@ import re
 import sys
 import uuid
 from typing import List, Tuple, Any
-
 DB_FILE = "graphics.db"
 
 # -----------------------
@@ -225,7 +221,7 @@ def normalize_color_changes_json(s: Any) -> str:
     return json.dumps(arr)
 
 # -----------------------
-# High-level insertion
+# High-level insertion (FIXED: Added uuid to shapes)
 # -----------------------
 def insert_point(conn: sqlite3.Connection, coords_json: str, uuid_str: str, connected_json: str, movements_json: str):
     cur = conn.cursor()
@@ -239,10 +235,11 @@ def insert_line(conn: sqlite3.Connection, uuid_str: str, endpoints_json: str, pu
                 (uuid_str, endpoints_json, pull_json, power_float, changes_json))
     conn.commit()
 
-def insert_shape(conn: sqlite3.Connection, points_json: str, lines_json: str, color_json: str, color_changes_json: str):
+# FIXED: Added uuid parameter to shape insertion
+def insert_shape(conn: sqlite3.Connection, uuid_str: str, points_json: str, lines_json: str, color_json: str, color_changes_json: str):
     cur = conn.cursor()
-    cur.execute("INSERT INTO shapes (point_uuids, line_uuids, color, movements) VALUES (?, ?, ?, ?)",
-                (points_json, lines_json, color_json, color_changes_json))
+    cur.execute("INSERT OR REPLACE INTO shapes (uuid, point_uuids, line_uuids, color, movements) VALUES (?, ?, ?, ?, ?)",
+                (uuid_str, points_json, lines_json, color_json, color_changes_json))
     conn.commit()
 
 # -----------------------
@@ -252,7 +249,8 @@ def extract_table_block(text: str, table_marker: str) -> str:
     """
     Returns block of text between 'TABLEX:' and next 'TABLE' marker or end.
     """
-    pattern = re.compile(r'(' + re.escape(table_marker) + r'\s*[:\n\r])', re.IGNORECASE)
+    pattern = re.compile(r'(' + re.escape(table_marker) + r'\s*[:
+\r])', re.IGNORECASE)
     m = re.search(re.escape(table_marker), text, re.IGNORECASE)
     if not m:
         return ""
@@ -305,7 +303,6 @@ def process_json_input(conn: sqlite3.Connection, data: dict):
         movements_json = normalize_movements_json(p.get("movements", p.get("changes", [])))
         insert_point(conn, coords, uuid_str, connected_json, movements_json)
         inserted["points"] += 1
-
     # LINES
     lns = data.get("lines", []) or []
     for l in lns:
@@ -320,21 +317,20 @@ def process_json_input(conn: sqlite3.Connection, data: dict):
         except Exception as e:
             print("Skipping line due to error:", e, l)
             continue
-
-    # SHAPES
+    # SHAPES (FIXED: Added uuid handling)
     shs = data.get("shapes", []) or []
     for s in shs:
         try:
+            uuid_str = str(s.get("uuid") or str(uuid.uuid4()))
             points_json = normalize_uuid_list_json(s.get("points", s.get("point_uuids", [])))
             lines_json = normalize_uuid_list_json(s.get("lines", s.get("line_uuids", [])))
             color_json = normalize_vector3_json(s.get("color", s.get("fill_color", [1.0,1.0,1.0])))
             color_changes_json = normalize_color_changes_json(s.get("color_changes", s.get("movements", [])))
-            insert_shape(conn, points_json, lines_json, color_json, color_changes_json)
+            insert_shape(conn, uuid_str, points_json, lines_json, color_json, color_changes_json)
             inserted["shapes"] += 1
         except Exception as e:
             print("Skipping shape due to error:", e, s)
             continue
-
     return inserted
 
 def process_legacy_text(conn: sqlite3.Connection, raw_text: str):
@@ -343,7 +339,6 @@ def process_legacy_text(conn: sqlite3.Connection, raw_text: str):
     tbl1 = extract_table_block(raw_text, "TABLE1")
     tbl2 = extract_table_block(raw_text, "TABLE2")
     tbl3 = extract_table_block(raw_text, "TABLE3")
-
     # TABLE1 -> points
     rows1 = parse_legacy_rows(tbl1)
     for fields in rows1:
@@ -362,7 +357,6 @@ def process_legacy_text(conn: sqlite3.Connection, raw_text: str):
         except Exception as e:
             print("Skipping legacy point row - error:", e, fields)
             continue
-
     # TABLE2 -> lines
     rows2 = parse_legacy_rows(tbl2)
     for fields in rows2:
@@ -383,26 +377,26 @@ def process_legacy_text(conn: sqlite3.Connection, raw_text: str):
         except Exception as e:
             print("Skipping legacy line row - error:", e, fields)
             continue
-
-    # TABLE3 -> shapes
+    # TABLE3 -> shapes (FIXED: Added uuid handling)
     rows3 = parse_legacy_rows(tbl3)
     for fields in rows3:
-        # expected: point_uuids, line_uuids, color, movements
+        # expected: uuid, point_uuids, line_uuids, color, movements
         try:
-            pts_raw = fields[0] if len(fields) >= 1 else ""
-            lns_raw = fields[1] if len(fields) >= 2 else ""
-            color_raw = fields[2] if len(fields) >= 3 else "[1,1,1]"
-            mov_raw = fields[3] if len(fields) >= 4 else ""
+            uuid_raw = fields[0] if len(fields) >= 1 else ""
+            pts_raw = fields[1] if len(fields) >= 2 else ""
+            lns_raw = fields[2] if len(fields) >= 3 else ""
+            color_raw = fields[3] if len(fields) >= 4 else "[1,1,1]"
+            mov_raw = fields[4] if len(fields) >= 5 else ""
+            uuid_str = str(uuid_raw) if str(uuid_raw).strip()!='' else str(uuid.uuid4())
             pts_json = normalize_uuid_list_json(pts_raw)
             lns_json = normalize_uuid_list_json(lns_raw)
             color_json = normalize_vector3_json(color_raw)
             color_changes_json = normalize_color_changes_json(mov_raw)
-            insert_shape(conn, pts_json, lns_json, color_json, color_changes_json)
+            insert_shape(conn, uuid_str, pts_json, lns_json, color_json, color_changes_json)
             inserted["shapes"] += 1
         except Exception as e:
             print("Skipping legacy shape row - error:", e, fields)
             continue
-
     return inserted
 
 # -----------------------
@@ -423,12 +417,10 @@ def main():
     ap.add_argument("--clear", action="store_true", help="Clear tables before inserting")
     ap.add_argument("--seed-example", action="store_true", help="Insert a tiny example after creating DB (no-op here)")
     args = ap.parse_args()
-
     if not os.path.exists(args.db):
         print("DB not found:", args.db)
         print("Run ZeroInit.py to create the DB first.")
         sys.exit(1)
-
     if args.stdin:
         raw = sys.stdin.read()
     elif args.input:
@@ -438,14 +430,12 @@ def main():
         print("Provide an input file or use --stdin")
         ap.print_help()
         return
-
     # Try parse JSON first
     j = try_load_json(raw)
     conn = sqlite3.connect(args.db)
     if args.clear:
         clear_tables(conn)
         print("Cleared existing tables.")
-
     inserted = {"points":0,"lines":0,"shapes":0}
     if j is not None and isinstance(j, dict):
         print("Detected JSON input. Processing...")
@@ -453,7 +443,6 @@ def main():
     else:
         print("Treating input as legacy text format. Parsing...")
         inserted = process_legacy_text(conn, raw)
-
     conn.close()
     print("Insertion summary:", inserted)
     print("Done.")
