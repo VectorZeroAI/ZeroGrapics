@@ -1,69 +1,35 @@
-#ZeroAudio.py
-"""
-ZeroAudio.py
-- Handles audio playback in sync with the video
-- Reads from the music and speech tables in the database
-- Generates and plays audio using pygame.mixer and a TTS engine
-"""
+# ZeroAudio.py - Audio Player for ZeroGraphics
 
-import pygame
 import sqlite3
-import json
-import time
 import numpy as np
-import math
-from typing import List, Dict, Tuple, Optional
-import pyttsx3  # For text-to-speech
+import pygame
+import time
+import pyttsx3  # For speech synthesis
+import json
+from typing import List, Dict, Any, Tuple, Optional
 
 class ZeroAudioPlayer:
     def __init__(self, db_path: str, sample_rate: int = 44100):
-        """
-        Initialize the audio player
-        
-        Args:
-            db_path: Path to the SQLite database
-            sample_rate: Audio sample rate (default: 44100 Hz)
-        """
-        # Initialize pygame mixer
-        pygame.mixer.init(frequency=sample_rate, size=-16, channels=2, buffer=512)
-        
-        # Connect to database
-        self.db_path = db_path
         self.conn = sqlite3.connect(db_path)
-        
-        # Audio parameters
         self.sample_rate = sample_rate
-        self.current_time = 0  # Current time in ms
-        self.is_playing = False
+        self.audio = pygame.mixer
+        self.audio.init(self.sample_rate, -16, 1, 512)
+        self.sound_channels = {}
+        self.pending_music_notes = []
+        self.pending_speech = []
+        self.played_speech_ids = set()
         self.speech_engine = None
-        self.pending_speech = []  # Queue of speech to be played
-        self.last_music_time = -1  # Last time we processed music
+        self.current_time_ms = 0
+        self.paused = False
+        self.last_update_time = time.time()
         
-        # Initialize TTS engine
-        self._init_tts_engine()
-        
-        # Load instrument sounds
-        self.instruments = {}
-        self._load_instruments()
-        
-    def _init_tts_engine(self):
-        """Initialize the text-to-speech engine"""
+        # Initialize speech engine
         try:
             self.speech_engine = pyttsx3.init()
-            # Configure voice properties
-            self.speech_engine.setProperty('rate', 150)  # words per minute
-            self.speech_engine.setProperty('volume', 0.9)
-        except Exception as e:
-            print(f"Warning: Could not initialize TTS engine: {e}")
-            self.speech_engine = None
-            
-    def _load_instruments(self):
-        """
-        Load instrument sounds.
-        In a real implementation, this would load actual sound samples or
-        synthesize sounds based on the instrument ID.
-        """
-        # For demonstration, we'll just define some basic wave generation functions
+        except:
+            print("Warning: Could not initialize speech engine. Speech functionality will be limited.")
+        
+        # Instrument mapping
         self.instruments = {
             "piano": self._generate_piano_note,
             "guitar": self._generate_guitar_note,
@@ -77,8 +43,7 @@ class ZeroAudioPlayer:
     
     def _generate_sine_wave(self, frequency: float, duration_ms: int, 
                            amplitude: float = 0.5, sample_rate: int = None) -> np.ndarray:
-        """
-        Generate a sine wave
+        """Generate a sine wave with proper fade-out to prevent clicks
         
         Args:
             frequency: Frequency in Hz
@@ -94,272 +59,223 @@ class ZeroAudioPlayer:
             
         # Calculate number of samples
         num_samples = int((duration_ms / 1000.0) * sample_rate)
-        
-        # Generate time values
+        if num_samples <= 0:
+            return np.array([], dtype=np.float32)
+            
+        # Generate time points
         t = np.linspace(0, duration_ms / 1000.0, num_samples, False)
         
         # Generate sine wave
-        wave = amplitude * np.sin(frequency * t * 2 * np.pi)
+        wave = amplitude * np.sin(2 * np.pi * frequency * t)
         
-        # Apply fade-out to avoid clicks
-        fade_out = np.linspace(1.0, 0.0, int(sample_rate * 0.01))  # 10ms fade out
-        if len(wave) > len(fade_out):
-            wave[-len(fade_out):] *= fade_out
+        # Apply fade-out (10ms or proportional to note duration)
+        fade_out_ms = min(10, duration_ms * 0.1)  # 10% of note duration, max 10ms
+        fade_out_samples = int((fade_out_ms / 1000.0) * sample_rate)
         
-        return wave
-    
-    def _generate_piano_note(self, note: int, duration_ms: int) -> np.ndarray:
-        """
-        Generate a piano-like note
-        
-        Args:
-            note: MIDI note number (0-127)
-            duration_ms: Duration in milliseconds
-            
-        Returns:
-            Numpy array containing the audio samples
-        """
-        # Convert MIDI note to frequency
-        frequency = 440 * (2 ** ((note - 69) / 12.0))
-        
-        # Generate the main sine wave
-        wave = self._generate_sine_wave(frequency, duration_ms, 0.3)
-        
-        # Add some harmonics to make it sound more piano-like
-        harmonic2 = self._generate_sine_wave(frequency * 2, duration_ms, 0.2)
-        harmonic3 = self._generate_sine_wave(frequency * 3, duration_ms, 0.1)
-        
-        # Combine the waves
-        if len(harmonic2) > len(wave):
-            harmonic2 = harmonic2[:len(wave)]
-        if len(harmonic3) > len(wave):
-            harmonic3 = harmonic3[:len(wave)]
-            
-        wave[:len(harmonic2)] += harmonic2
-        wave[:len(harmonic3)] += harmonic3
-        
-        # Normalize
-        max_val = np.max(np.abs(wave))
-        if max_val > 0:
-            wave /= max_val
+        if fade_out_samples > 0 and len(wave) > 0:
+            fade_curve = np.linspace(1.0, 0.0, min(fade_out_samples, len(wave)))
+            wave[-len(fade_curve):] *= fade_curve
             
         return wave
     
-    def _generate_guitar_note(self, note: int, duration_ms: int) -> np.ndarray:
-        """
-        Generate a guitar-like note
-        
-        Args:
-            note: MIDI note number (0-127)
-            duration_ms: Duration in milliseconds
-            
-        Returns:
-            Numpy array containing the audio samples
-        """
-        frequency = 440 * (2 ** ((note - 69) / 12.0))
-        
-        # Generate a slightly detuned sine wave for a richer sound
-        wave1 = self._generate_sine_wave(frequency, duration_ms, 0.25)
-        wave2 = self._generate_sine_wave(frequency * 1.005, duration_ms, 0.25)
-        
-        # Combine
-        wave = wave1 + wave2
-        
-        # Apply an envelope to simulate pluck decay
-        num_samples = len(wave)
-        envelope = np.exp(-np.linspace(0, 5, num_samples))  # Exponential decay
-        wave *= envelope
-        
-        # Normalize
-        max_val = np.max(np.abs(wave))
-        if max_val > 0:
-            wave /= max_val
-            
-        return wave
-    
-    def _generate_synth_note(self, note: int, duration_ms: int) -> np.ndarray:
-        """
-        Generate a synth-like note
-        
-        Args:
-            note: MIDI note number (0-127)
-            duration_ms: Duration in milliseconds
-            
-        Returns:
-            Numpy array containing the audio samples
-        """
-        frequency = 440 * (2 ** ((note - 69) / 12.0))
-        
-        # Generate a square wave
-        num_samples = int((duration_ms / 1000.0) * self.sample_rate)
-        t = np.linspace(0, duration_ms / 1000.0, num_samples, False)
-        wave = 0.5 * np.sign(np.sin(2 * np.pi * frequency * t))
-        
-        # Add some noise for texture
-        noise = 0.05 * np.random.normal(0, 1, num_samples)
-        wave += noise
+    def _generate_piano_note(self, note_freq: float, duration_ms: int) -> np.ndarray:
+        """Generate a piano-like note with ADSR envelope"""
+        # Generate base sine wave
+        wave = self._generate_sine_wave(note_freq, duration_ms, 0.4)
         
         # Apply ADSR envelope
-        attack = int(0.01 * num_samples)  # 10ms attack
-        decay = int(0.1 * num_samples)    # 100ms decay
-        sustain = 0.7
-        release = int(0.05 * num_samples) # 50ms release
+        num_samples = len(wave)
+        attack_samples = int(num_samples * 0.05)  # 5% attack
+        decay_samples = int(num_samples * 0.2)    # 20% decay
+        sustain_level = 0.7
+        release_samples = int(num_samples * 0.2)  # 20% release
         
         envelope = np.ones(num_samples)
-        envelope[:attack] = np.linspace(0, 1, attack)
-        envelope[attack:attack+decay] = np.linspace(1, sustain, decay)
-        envelope[attack+decay:num_samples-release] = sustain
-        envelope[num_samples-release:] = np.linspace(sustain, 0, release)
         
-        wave *= envelope
+        # Attack
+        if attack_samples > 0:
+            envelope[:attack_samples] = np.linspace(0, 1, attack_samples)
         
-        # Normalize
-        max_val = np.max(np.abs(wave))
-        if max_val > 0:
-            wave /= max_val
+        # Decay
+        if decay_samples > 0:
+            envelope[attack_samples:attack_samples+decay_samples] = np.linspace(1, sustain_level, decay_samples)
+        
+        # Sustain
+        sustain_end = num_samples - release_samples
+        if sustain_end > attack_samples + decay_samples:
+            envelope[attack_samples+decay_samples:sustain_end] = sustain_level
+        
+        # Release
+        if release_samples > 0 and sustain_end < num_samples:
+            envelope[sustain_end:] = np.linspace(sustain_level, 0, num_samples - sustain_end)
+        
+        return wave * envelope
+    
+    def _generate_guitar_note(self, note_freq: float, duration_ms: int) -> np.ndarray:
+        """Generate a guitar-like note with pluck simulation"""
+        # Generate base wave with harmonics
+        wave = self._generate_sine_wave(note_freq, duration_ms, 0.3)
+        wave += self._generate_sine_wave(note_freq * 2, duration_ms, 0.2)
+        wave += self._generate_sine_wave(note_freq * 3, duration_ms, 0.1)
+        
+        # Apply pluck envelope (fast decay)
+        num_samples = len(wave)
+        decay_samples = min(int(num_samples * 0.8), num_samples)
+        
+        if decay_samples > 0:
+            envelope = np.exp(-np.linspace(0, 5, decay_samples))
+            wave[:decay_samples] *= envelope
             
+            if num_samples > decay_samples:
+                wave[decay_samples:] = 0
+        
         return wave
     
-    def _play_sound(self, sound_array: np.ndarray):
-        """
-        Play a sound from a numpy array
+    def _generate_synth_note(self, note_freq: float, duration_ms: int) -> np.ndarray:
+        """Generate a basic synth note"""
+        return self._generate_sine_wave(note_freq, duration_ms, 0.5)
+    
+    def _note_to_frequency(self, note: str) -> float:
+        """Convert note name (like 'C4') to frequency in Hz"""
+        notes = {'C': 0, 'C#': 1, 'D': 2, 'D#': 3, 'E': 4, 'F': 5, 'F#': 6, 
+                 'G': 7, 'G#': 8, 'A': 9, 'A#': 10, 'B': 11}
         
-        Args:
-            sound_array: Numpy array containing audio samples
-        """
-        # Convert to 16-bit signed integers
-        sound_int16 = (sound_array * 32767).astype(np.int16)
+        # Extract note name and octave
+        if len(note) == 3 and note[1] == '#':
+            note_name = note[:2]
+            octave = int(note[2])
+        else:
+            note_name = note[0]
+            octave = int(note[1])
         
-        # Create a stereo sound (duplicate mono to both channels)
-        stereo_sound = np.column_stack((sound_int16, sound_int16))
+        # Calculate semitones from A4 (440Hz)
+        semitones = (octave - 4) * 12 + notes[note_name] - 9
+        frequency = 440 * (2 ** (semitones / 12.0))
+        return frequency
+    
+    def _create_sound(self, samples: np.ndarray) -> pygame.mixer.Sound:
+        """Create a pygame sound object from audio samples"""
+        # Ensure samples are in range [-1.0, 1.0]
+        samples = np.clip(samples, -1.0, 1.0)
         
-        # Create a Sound object and play it
-        sound = pygame.sndarray.make_sound(stereo_sound)
-        sound.play()
+        # Convert to 16-bit integers
+        int16_max = 32767
+        sound_int16 = (samples * int16_max).astype(np.int16)
+        
+        # Create stereo sound (duplicate channels)
+        stereo = np.column_stack((sound_int16, sound_int16))
+        
+        return self.audio.Sound(buffer=stereo.tobytes())
     
     def play_music_at_time(self, time_ms: int):
-        """
-        Play music that should start at the given time
-        
-        Args:
-            time_ms: Current time in milliseconds
-        """
-        # Only process each ms once
-        if time_ms <= self.last_music_time:
-            return
-            
-        self.last_music_time = time_ms
-        
-        # Get music data for this specific time
+        """Play all music events that are active at the given time"""
+        # Get all music events that start before or at the current time
+        # and are still playing (start + duration > current time)
         cur = self.conn.cursor()
-        cur.execute("SELECT notes, durations, instrument_id FROM music WHERE timestamp_ms = ?", (time_ms,))
-        row = cur.fetchone()
+        cur.execute("""
+            SELECT timestamp_ms, notes, durations, instrument_id 
+            FROM music 
+            WHERE timestamp_ms <= ? AND (timestamp_ms + CAST(json_extract(durations, '$[0]') AS INTEGER)) > ?
+        """, (time_ms, time_ms))
         
-        if not row:
-            return
-            
-        notes_json, durations_json, instrument_id = row
-        
-        try:
-            notes = json.loads(notes_json)
-            durations = json.loads(durations_json)
-        except json.JSONDecodeError:
-            return
-            
-        # Get the instrument function
-        instrument_func = self.instruments.get(instrument_id, self.instruments["default"])
-        
-        # Play each note
-        for i in range(min(len(notes), len(durations))):
-            note = notes[i]
-            duration = durations[i]
-            
-            # Generate the sound
-            sound_array = instrument_func(note, duration)
-            
-            # Play the sound
-            self._play_sound(sound_array)
+        # Process each music event
+        for row in cur.fetchall():
+            try:
+                timestamp_ms = row["timestamp_ms"]
+                notes = json.loads(row["notes"])
+                durations = json.loads(row["durations"])
+                instrument_id = row["instrument_id"] or "default"
+                
+                # Get instrument generator function
+                instrument_func = self.instruments.get(instrument_id, self.instruments["default"])
+                
+                # Play each note in the chord
+                for i, note in enumerate(notes):
+                    if i < len(durations):
+                        duration = durations[i]
+                        # Only play notes that are active at current time
+                        if timestamp_ms + duration > time_ms:
+                            freq = self._note_to_frequency(note)
+                            # Generate sound for the remaining portion of the note
+                            remaining_duration = min(duration, time_ms - timestamp_ms)
+                            if remaining_duration > 0:
+                                samples = instrument_func(freq, remaining_duration)
+                                sound = self._create_sound(samples)
+                                
+                                # Play the sound
+                                channel = sound.play()
+                                if channel:
+                                    self.sound_channels[channel] = {
+                                        "end_time": time_ms + remaining_duration,
+                                        "sound": sound
+                                    }
+            except Exception as e:
+                print(f"Error processing music event at {timestamp_ms}: {e}")
     
-    def schedule_speech_at_time(self, time_ms: int):
-        """
-        Schedule speech that should start at or before the given time
+    def play_scheduled_speech(self, current_time_ms: int):
+        """Play speech that should start at or before the current time"""
+        # Check if we need to start new speech
+        if not self.pending_speech:
+            cur = self.conn.cursor()
+            cur.execute("""
+                SELECT id, sentence, start_time_ms, voice_id 
+                FROM speech 
+                WHERE start_time_ms <= ? 
+                ORDER BY start_time_ms
+            """, (current_time_ms,))
+            
+            for row in cur.fetchall():
+                if row["id"] not in self.played_speech_ids:
+                    self.pending_speech.append({
+                        "id": row["id"],
+                        "sentence": row["sentence"],
+                        "start_time_ms": row["start_time_ms"],
+                        "voice_id": row["voice_id"]
+                    })
+                    self.played_speech_ids.add(row["id"])
         
-        Args:
-            time_ms: Current time in milliseconds
-        """
-        # Check for speech that should start now or earlier but hasn't been scheduled yet
-        cur = self.conn.cursor()
-        cur.execute("SELECT sentence, voice_id FROM speech WHERE start_time_ms <= ? AND start_time_ms > ?", 
-                   (time_ms, self.current_time))
-        rows = cur.fetchall()
-        
-        for row in rows:
-            sentence, voice_id = row
-            self.pending_speech.append((sentence, voice_id))
-    
-    def play_scheduled_speech(self):
-        """Play any scheduled speech"""
+        # Process pending speech
         while self.pending_speech and self.speech_engine:
-            sentence, voice_id = self.pending_speech.pop(0)
-            
-            # Configure voice based on voice_id
-            if "female" in voice_id.lower():
-                # This is platform-dependent; might need to select a specific voice
-                voices = self.speech_engine.getProperty('voices')
-                for voice in voices:
-                    if "female" in voice.name.lower():
-                        self.speech_engine.setProperty('voice', voice.id)
-                        break
-            
-            # Queue the sentence for speaking
-            self.speech_engine.say(sentence)
-        
-        # Run the TTS engine to process the queue
-        if self.pending_speech and self.speech_engine:
-            self.speech_engine.runAndWait()
+            speech = self.pending_speech.pop(0)
+            self.speech_engine.say(speech["sentence"])
+            self.speech_engine.runAndWait()  # Run and wait for THIS speech item
     
-    def update(self, time_ms: int):
-        """
-        Update the audio player for the current time
+    def update(self, current_time_ms: int):
+        """Update audio state based on current time"""
+        if self.paused:
+            return
+            
+        # Update time tracking
+        self.current_time_ms = current_time_ms
         
-        Args:
-            time_ms: Current time in milliseconds
-        """
-        self.current_time = time_ms
+        # Play music events for this time
+        self.play_music_at_time(current_time_ms)
         
-        # Play music for this time
-        self.play_music_at_time(time_ms)
+        # Play scheduled speech
+        self.play_scheduled_speech(current_time_ms)
         
-        # Schedule speech for this time
-        self.schedule_speech_at_time(time_ms)
+        # Clean up finished sounds
+        current_time = time.time()
+        channels_to_remove = []
+        for channel, data in self.sound_channels.items():
+            if data["end_time"] <= current_time_ms:
+                channels_to_remove.append(channel)
         
-        # Play any scheduled speech
-        self.play_scheduled_speech()
-    
-    def play(self):
-        """Start audio playback"""
-        self.is_playing = True
+        for channel in channels_to_remove:
+            del self.sound_channels[channel]
     
     def pause(self):
         """Pause audio playback"""
-        self.is_playing = False
-        pygame.mixer.pause()
-        if self.speech_engine:
-            self.speech_engine.stop()
+        self.paused = True
+        self.audio.pause()
     
-    def stop(self):
-        """Stop audio playback"""
-        self.is_playing = False
-        pygame.mixer.stop()
-        if self.speech_engine:
-            self.speech_engine.stop()
-            self.speech_engine.reset()
+    def play(self):
+        """Resume audio playback"""
+        self.paused = False
+        self.audio.unpause()
     
     def cleanup(self):
-        """Clean up resources"""
-        self.stop()
-        pygame.mixer.quit()
+        """Clean up audio resources"""
         if self.speech_engine:
             self.speech_engine.stop()
-            self.speech_engine = None
-        self.conn.close()
+        self.audio.quit()
