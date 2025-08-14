@@ -4,12 +4,16 @@ ZeroInterpreter.py
   points(uuid TEXT, coordinates TEXT, connected_points TEXT, movements TEXT)
   lines(uuid TEXT, endpoints TEXT, pull_point TEXT, pull_power REAL, movements TEXT)
   shapes(uuid TEXT, point_uuids TEXT, line_uuids TEXT, color TEXT, movements TEXT)  # FIXED: Added uuid
+  music(timestamp_ms INTEGER, notes TEXT, durations TEXT, instrument_id TEXT)
+  speech(id INTEGER, sentence TEXT, start_time_ms INTEGER, voice_id TEXT)
 - Supports two field formats:
   * JSON-like arrays:  [x,y,z]  or  [ [...],... ]
   * semicolon-separated: "x;y;z"  or  "(x;y;[a;b;c]);..." etc.
 - Public method: read_full(tick_in_ms) -> frame dict suitable for rendering.
+- Also provides methods to get audio events: get_music_events(tick_in_ms), get_speech_events(tick_in_ms)
 - NOTE: Movements for a single entity must not overlap (enforced by documentation)
 """
+
 import sqlite3
 import json
 import math
@@ -393,7 +397,7 @@ class ZeroInterpreter:
         self.lines = {}    # uuid -> { endpoints: [u1,u2], pull_base: (x,y,z), power_base: float, changes: [...] }
         self.shapes = {}   # uuid -> { points: [...], lines: [...], fill_base: (r,g,b), color_changes: [...] }
         self._load_all()
-
+    
     def _load_all(self):
         """Load all data from database into memory structures"""
         cur = self.conn.cursor()
@@ -445,13 +449,11 @@ class ZeroInterpreter:
                     uuid = str(r["uuid"])  # FIXED: Now properly getting uuid
                     pts = parse_uuid_list(r["point_uuids"])
                     lns = parse_uuid_list(r["line_uuids"])
-                    
                     # FIXED: Ensure color is always a 3-tuple
                     try:
                         fill = parse_vector3(r["color"])
                     except (ValueError, TypeError):
                         fill = (1.0, 1.0, 1.0)
-                    
                     color_changes = parse_color_changes(r["movements"]) if r["movements"] is not None else []
                     self.shapes[uuid] = {
                         "points": pts, 
@@ -463,13 +465,85 @@ class ZeroInterpreter:
                     print(f"Warning: skipping malformed shape {r.get('uuid', 'unknown')}: {e}")
         except sqlite3.OperationalError:
             print("Warning: shapes table not found or invalid structure")
-
+    
+    # ----------------------
+    # Audio-related methods
+    # ----------------------
+    def get_music_events(self, start_time_ms: int, end_time_ms: int = None) -> List[Dict[str, Any]]:
+        """
+        Get music events that occur within the specified time range
+        
+        Args:
+            start_time_ms: Start of time range in milliseconds
+            end_time_ms: End of time range in milliseconds (defaults to start_time_ms)
+            
+        Returns:
+            List of music events in the time range
+        """
+        if end_time_ms is None:
+            end_time_ms = start_time_ms
+            
+        cur = self.conn.cursor()
+        cur.execute("""
+            SELECT timestamp_ms, notes, durations, instrument_id 
+            FROM music 
+            WHERE timestamp_ms BETWEEN ? AND ?
+            ORDER BY timestamp_ms
+        """, (start_time_ms, end_time_ms))
+        
+        events = []
+        for row in cur.fetchall():
+            try:
+                notes = json.loads(row["notes"])
+                durations = json.loads(row["durations"])
+                events.append({
+                    "time_ms": row["timestamp_ms"],
+                    "notes": notes,
+                    "durations": durations,
+                    "instrument": row["instrument_id"]
+                })
+            except (json.JSONDecodeError, TypeError):
+                continue
+                
+        return events
+    
+    def get_speech_events(self, start_time_ms: int, end_time_ms: int = None) -> List[Dict[str, Any]]:
+        """
+        Get speech events that start within the specified time range
+        
+        Args:
+            start_time_ms: Start of time range in milliseconds
+            end_time_ms: End of time range in milliseconds (defaults to start_time_ms)
+            
+        Returns:
+            List of speech events in the time range
+        """
+        if end_time_ms is None:
+            end_time_ms = start_time_ms
+            
+        cur = self.conn.cursor()
+        cur.execute("""
+            SELECT sentence, start_time_ms, voice_id 
+            FROM speech 
+            WHERE start_time_ms BETWEEN ? AND ?
+            ORDER BY start_time_ms
+        """, (start_time_ms, end_time_ms))
+        
+        events = []
+        for row in cur.fetchall():
+            events.append({
+                "sentence": row["sentence"],
+                "start_time_ms": row["start_time_ms"],
+                "voice": row["voice_id"]
+            })
+            
+        return events
+    
     # ----------------------
     # compute point position at tick
     # ----------------------
     def point_position_at(self, uuid: str, tick_ms: int) -> Tuple[float,float,float]:
         """Calculate point position at given time
-        
         NOTE: Movements for a single point must not overlap (enforced by documentation).
         If they do overlap, behavior is undefined and the input should be considered invalid.
         """
@@ -497,13 +571,12 @@ class ZeroInterpreter:
             progress = (tick_ms - start) / dur
             return lerp_vec(current, target, clamp(progress))
         return current
-
+    
     # ----------------------
     # compute pull point and power at tick for a line
     # ----------------------
     def line_pull_at(self, line_uuid: str, tick_ms: int) -> Tuple[Tuple[float,float,float], float]:
         """Calculate line pull point and power at given time
-        
         NOTE: Line changes must not overlap (enforced by documentation).
         If they do overlap, behavior is undefined and the input should be considered invalid.
         """
@@ -533,13 +606,12 @@ class ZeroInterpreter:
             curpow = lerp(current_power, new_power, clamp(progress))
             return curp, curpow
         return current_pos, current_power
-
+    
     # ----------------------
     # compute shape color at tick
     # ----------------------
     def shape_color_at(self, shape_uuid: str, tick_ms: int) -> Tuple[float,float,float]:
         """Calculate shape fill color at given time
-        
         NOTE: Color changes must not overlap (enforced by documentation).
         If they do overlap, behavior is undefined and the input should be considered invalid.
         """
@@ -567,7 +639,7 @@ class ZeroInterpreter:
                 lerp(current[2], newcol[2], clamp(progress))
             )
         return current
-
+    
     # ----------------------
     # Public: build full frame
     # ----------------------
@@ -642,6 +714,7 @@ class ZeroInterpreter:
         
         # 4) Prepare points list
         points_out = [{"uuid": u, "pos": pos} for u, pos in point_positions.items()]
+        
         return {
             "timestamp_ms": tick_in_ms,
             "points": points_out,
@@ -660,6 +733,23 @@ def _example_in_memory_db():
     cur.execute("CREATE TABLE points(uuid TEXT PRIMARY KEY, coordinates TEXT NOT NULL, connected_points TEXT, movements TEXT)")
     cur.execute("CREATE TABLE lines(uuid TEXT PRIMARY KEY, endpoints TEXT NOT NULL, pull_point TEXT NOT NULL, pull_power REAL NOT NULL, movements TEXT)")
     cur.execute("CREATE TABLE shapes(uuid TEXT PRIMARY KEY, point_uuids TEXT NOT NULL, line_uuids TEXT NOT NULL, color TEXT NOT NULL, movements TEXT)")
+    # Create audio tables
+    cur.execute("""
+        CREATE TABLE music (
+            timestamp_ms INTEGER PRIMARY KEY,
+            notes TEXT NOT NULL,
+            durations TEXT NOT NULL,
+            instrument_id TEXT NOT NULL
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE speech (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sentence TEXT NOT NULL,
+            start_time_ms INTEGER NOT NULL,
+            voice_id TEXT NOT NULL
+        )
+    """)
     # Insert sample points
     cur.execute("INSERT INTO points VALUES(?, ?, ?, ?)",
                 ("A", json.dumps([0.0,0.0,0.0]), json.dumps(["B"]), json.dumps([[0, 1000, [0.0, 1.0, 0.0]]])))
@@ -674,6 +764,12 @@ def _example_in_memory_db():
     # Insert sample shape (FIXED: Added uuid)
     cur.execute("INSERT INTO shapes VALUES(?, ?, ?, ?, ?)",
                 ("S1", json.dumps(["A","B","C"]), json.dumps(["L1"]), json.dumps([0.2,0.7,0.3]), None))
+    # Insert sample music
+    cur.execute("INSERT INTO music VALUES(?, ?, ?, ?)",
+                (100, json.dumps([60, 64, 67]), json.dumps([500, 500, 500]), "piano"))
+    # Insert sample speech
+    cur.execute("INSERT INTO speech VALUES(NULL, ?, ?, ?)",
+                ("Hello, this is a test of the speech system.", 2000, "female_english"))
     conn.commit()
     return conn
 
@@ -684,6 +780,12 @@ def run_example():
     with tempfile.NamedTemporaryFile(suffix=".db") as tf:
         conn.backup(sqlite3.connect(tf.name))
         interp = ZeroInterpreter(tf.name)
+        
+        # Test audio methods
+        print("Music events at 100ms:", interp.get_music_events(100))
+        print("Speech events at 2000ms:", interp.get_speech_events(2000))
+        
+        # Test regular frame rendering
         for t in [0, 250, 500, 750, 1000, 1500]:
             frame = interp.read_full(t)
             print(f"\nTime: {t}ms")
