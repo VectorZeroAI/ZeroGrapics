@@ -247,22 +247,31 @@ def insert_shape(conn: sqlite3.Connection, uuid_str: str, points_json: str, line
 # -----------------------
 def extract_table_block(text: str, table_marker: str) -> str:
     """
-    Returns block of text between 'TABLEX:' and next 'TABLE' marker or end.
+    Return the block of text after the first occurrence of table_marker
+    (e.g. "TABLE1") up to the next TABLE[1-3] marker or EOF.
+
+    Examples:
+      extract_table_block(raw_text, "TABLE1")
+    Will return the text immediately after "TABLE1" (case-insensitive)
+    until the next "TABLE1/2/3" header or end of file.
     """
-    pattern = re.compile(r'(' + re.escape(table_marker) + r'\s*[:
-\r])', re.IGNORECASE)
+    if not text or not table_marker:
+        return ""
+
+    # Find the marker (case-insensitive)
     m = re.search(re.escape(table_marker), text, re.IGNORECASE)
     if not m:
         return ""
-    # find start index
-    start = m.start()
-    # find next TABLE marker
-    nxt = re.search(r'\bTABLE[123]\b', text[m.end():], re.IGNORECASE)
+
+    start = m.end()
+    # Find next TABLE1|TABLE2|TABLE3 header after the marker
+    nxt = re.search(r'\bTABLE[123]\b', text[start:], re.IGNORECASE)
     if nxt:
-        end = m.end() + nxt.start()
+        end = start + nxt.start()
     else:
         end = len(text)
-    return text[m.end():end]
+
+    return text[start:end].strip()
 
 def parse_legacy_rows(block: str) -> List[List[str]]:
     """
