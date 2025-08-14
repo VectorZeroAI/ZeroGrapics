@@ -25,9 +25,9 @@ Table 1 music:
 
 Each row represents a ms
 
-Colum is a list of all the notes that should start in that moment. 
-Colum is the duration list for each note.
-Colum is the instrument ID
+Colum 1 is a list of all the notes that should start in that moment. 
+Colum 2 is the duration list for each note.
+Colum 3 is the instrument ID
 
 Table 2 speech:
 
