@@ -1,4 +1,3 @@
-#ZeroInterpriter.py
 """
 ZeroInterpreter.py
 - Connects to an SQLite DB with the tables:
@@ -6,9 +5,10 @@ ZeroInterpreter.py
   lines(uuid TEXT, endpoints TEXT, pull_point TEXT, pull_power REAL, movements TEXT)
   shapes(uuid TEXT, point_uuids TEXT, line_uuids TEXT, color TEXT, movements TEXT)  # FIXED: Added uuid
 - Supports two field formats:
-  * JSON-like arrays:  [x,y,z]  or  [[...],...]
+  * JSON-like arrays:  [x,y,z]  or  [ [...],... ]
   * semicolon-separated: "x;y;z"  or  "(x;y;[a;b;c]);..." etc.
 - Public method: read_full(tick_in_ms) -> frame dict suitable for rendering.
+- NOTE: Movements for a single entity must not overlap (enforced by documentation)
 """
 import sqlite3
 import json
@@ -445,7 +445,13 @@ class ZeroInterpreter:
                     uuid = str(r["uuid"])  # FIXED: Now properly getting uuid
                     pts = parse_uuid_list(r["point_uuids"])
                     lns = parse_uuid_list(r["line_uuids"])
-                    fill = tuple(parse_vectorN(r["color"])[:3]) if r["color"] is not None else (1.0, 1.0, 1.0)
+                    
+                    # FIXED: Ensure color is always a 3-tuple
+                    try:
+                        fill = parse_vector3(r["color"])
+                    except (ValueError, TypeError):
+                        fill = (1.0, 1.0, 1.0)
+                    
                     color_changes = parse_color_changes(r["movements"]) if r["movements"] is not None else []
                     self.shapes[uuid] = {
                         "points": pts, 
@@ -462,7 +468,11 @@ class ZeroInterpreter:
     # compute point position at tick
     # ----------------------
     def point_position_at(self, uuid: str, tick_ms: int) -> Tuple[float,float,float]:
-        """Calculate point position at given time"""
+        """Calculate point position at given time
+        
+        NOTE: Movements for a single point must not overlap (enforced by documentation).
+        If they do overlap, behavior is undefined and the input should be considered invalid.
+        """
         rec = self.points.get(uuid)
         if rec is None:
             raise KeyError(f"Point {uuid} not found")
@@ -492,7 +502,11 @@ class ZeroInterpreter:
     # compute pull point and power at tick for a line
     # ----------------------
     def line_pull_at(self, line_uuid: str, tick_ms: int) -> Tuple[Tuple[float,float,float], float]:
-        """Calculate line pull point and power at given time"""
+        """Calculate line pull point and power at given time
+        
+        NOTE: Line changes must not overlap (enforced by documentation).
+        If they do overlap, behavior is undefined and the input should be considered invalid.
+        """
         rec = self.lines.get(line_uuid)
         if rec is None:
             raise KeyError(f"Line {line_uuid} not found")
@@ -524,7 +538,11 @@ class ZeroInterpreter:
     # compute shape color at tick
     # ----------------------
     def shape_color_at(self, shape_uuid: str, tick_ms: int) -> Tuple[float,float,float]:
-        """Calculate shape fill color at given time"""
+        """Calculate shape fill color at given time
+        
+        NOTE: Color changes must not overlap (enforced by documentation).
+        If they do overlap, behavior is undefined and the input should be considered invalid.
+        """
         rec = self.shapes.get(shape_uuid)
         if rec is None:
             raise KeyError(f"Shape {shape_uuid} not found")
@@ -567,6 +585,7 @@ class ZeroInterpreter:
         lines_out = []
         for uuid, rec in self.lines.items():
             endpoints = rec["endpoints"]
+            # Skip lines with insufficient endpoints
             if len(endpoints) < 2:
                 continue
             u0, u1 = endpoints[0], endpoints[1]
@@ -575,8 +594,6 @@ class ZeroInterpreter:
             p0 = point_positions[u0]
             p1 = point_positions[u1]
             pull_point, pull_power = self.line_pull_at(uuid, tick_in_ms)
-            
-            # FIXED: Implement pull_power to scale control point influence
             # Calculate midpoint
             mid = ((p0[0] + p1[0])/2, (p0[1] + p1[1])/2, (p0[2] + p1[2])/2)
             # Calculate offset from midpoint to pull_point
@@ -585,11 +602,9 @@ class ZeroInterpreter:
             scaled_offset = (offset[0] * pull_power, offset[1] * pull_power, offset[2] * pull_power)
             # Calculate effective control point
             effective_pc = (mid[0] + scaled_offset[0], mid[1] + scaled_offset[1], mid[2] + scaled_offset[2])
-            
             # Sample the Bézier curve using effective control point
             n_samples = sample_count_for_curve(p0, effective_pc, p1)
             samples = sample_quadratic_bezier(p0, effective_pc, p1, n_samples)
-            
             lines_out.append({
                 "uuid": uuid,
                 "from_uuid": u0,
