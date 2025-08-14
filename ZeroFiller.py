@@ -1,3 +1,4 @@
+#ZeroFiller.py
 """
 ZeroFiller.py
 - Reads LLM-generated .txt or .json that describes points, lines, shapes, and audio.
