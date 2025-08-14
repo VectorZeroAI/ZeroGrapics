@@ -1,5 +1,5 @@
 # ZeroGrapics
-A graphics engine, that allows for text based models to generate videos.
+An mobile App, allowing for AI generation of Videos and EXTREMELY compact video storage. 
 
 ---
 
