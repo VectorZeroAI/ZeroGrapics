@@ -13,6 +13,44 @@ UIV1 is the backend + an interface, wrapped into a mobile app.
 
 release is the final version, that has the AI generation and editing implemented. 
 
+
+
+
+MAIN TO-DO LIST:
+ADD SOUND SUPPORT/SOUND GENERATION!!!
+
+Plan for sound support:
+
+Table 1 music:
+
+Each row represents a ms
+
+Colum is a list of all the notes that should start in that moment. 
+Colum is the duration list for each note.
+Colum is the instrument ID
+
+Table 2 speech:
+
+each row represents new sentense
+colum 1 is the sentense itself
+colum 2 is the time when it should start
+colum 3 is the voise ID
+
+ID to actuall methods translations are config defined.
+
+
+ZeroAudio.py
+
+  The audio Player. 
+
+ZeroAudioFiller.py
+
+  Fills out the Tables for the ZeroAudio.py module.
+
+Update ZeroInit.py to create the 2 additional tables for the Audio handling.
+
+
+
 ---
 
 #Summary!
