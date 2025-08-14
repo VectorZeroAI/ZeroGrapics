@@ -137,6 +137,7 @@ class ZeroEngine:
         glDrawArrays(GL_POINTS, 0, self.point_count)
         glDisableClientState(GL_VERTEX_ARRAY)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
+
     def draw_lines(self, color):
         if not self.line_segments:
             return
@@ -145,14 +146,12 @@ class ZeroEngine:
         glBindBuffer(GL_ARRAY_BUFFER, self.vbo_lines)
         glEnableClientState(GL_VERTEX_ARRAY)
         glVertexPointer(3, GL_FLOAT, 0, ctypes.c_void_p(0))
-        # draw each segment individually using offsets
+    # draw each segment using the offset parameter of glDrawArrays
         for (start, count) in self.line_segments:
-            # start is in vertex indices; pointer offset = start * 3 * 4 bytes
-            ptr = ctypes.c_void_p(start * 3 * 4)
-            glVertexPointer(3, GL_FLOAT, 0, ptr)
-            glDrawArrays(GL_LINE_STRIP, 0, count)
+            glDrawArrays(GL_LINE_STRIP, start, count)
         glDisableClientState(GL_VERTEX_ARRAY)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
+
     def draw_shapes(self):
         if self.shape_tri_count == 0:
             return
