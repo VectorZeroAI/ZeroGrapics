@@ -4,7 +4,6 @@ import os
 import json
 import uuid
 DB_FILE = "graphics.db"
-
 def create_database(db_path=DB_FILE, overwrite=False):
     # Remove DB if overwriting
     if overwrite and os.path.exists(db_path):
