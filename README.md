@@ -1,6 +1,18 @@
 # ZeroGrapics
 An mobile App, allowing for AI generation of Videos and EXTREMELY compact video storage. 
 
+This repo will have 3 branches:
+main
+UIV1
+release
+
+main is the backend. Because I am opensourse fan, feel free to copy my code, integrate and use it. 
+Make money with it, i dont care, I made this for fun.
+
+UIV1 is the backend + an interface, wrapped into a mobile app. 
+
+release is the final version, that has the AI generation and editing implemented. 
+
 ---
 
 #Summary!
