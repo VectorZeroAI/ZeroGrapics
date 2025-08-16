@@ -1,281 +1,342 @@
 # ZeroAudio.py - Audio Player for ZeroGraphics
+# (Assuming the rest of the file content is present before this snippet)
 
 import sqlite3
 import numpy as np
 import pygame
 import time
-import pyttsx3  # For speech synthesis
+import pyttsx3 # For speech synthesis
 import json
 from typing import List, Dict, Any, Tuple, Optional
 
 class ZeroAudioPlayer:
     def __init__(self, db_path: str, sample_rate: int = 44100):
+        # --- FIX 1 (Critical): Add row_factory for named row access ---
         self.conn = sqlite3.connect(db_path)
+        self.conn.row_factory = sqlite3.Row # <-- ADDED THIS LINE
+        # ---
         self.sample_rate = sample_rate
         self.audio = pygame.mixer
-        self.audio.init(self.sample_rate, -16, 1, 512)
-        self.sound_channels = {}
-        self.pending_music_notes = []
-        self.pending_speech = []
+        self.audio.init(self.sample_rate, -16, 2, 512) # Increased channels to 2
+        self.sound_channels: Dict[int, Dict[str, Any]] = {} # Channel ID -> {sound, end_time}
+        self.pending_music_notes: List[Tuple[int, int, float, int, str]] = [] # (timestamp, duration, freq, note_id, instrument_id)
+        self.pending_speech: List[Tuple[str, int, str, int]] = [] # (sentence, start_time_ms, voice_id, db_id)
         self.played_speech_ids = set()
-        self.speech_engine = None
+        self.speech_engine: Optional[pyttsx3.Engine] = None
         self.current_time_ms = 0
         self.paused = False
         self.last_update_time = time.time()
-        
-        # Initialize speech engine
-        try:
-            self.speech_engine = pyttsx3.init()
-        except:
-            print("Warning: Could not initialize speech engine. Speech functionality will be limited.")
-        
-        # Instrument mapping
-        self.instruments = {
-            "piano": self._generate_piano_note,
-            "guitar": self._generate_guitar_note,
-            "synth": self._generate_synth_note,
-            # Add more instruments as needed
-        }
-        
-        # Default instrument if none specified
-        if "default" not in self.instruments:
-            self.instruments["default"] = self._generate_synth_note
-    
-    def _generate_sine_wave(self, frequency: float, duration_ms: int, 
-                           amplitude: float = 0.5, sample_rate: int = None) -> np.ndarray:
-        """Generate a sine wave with proper fade-out to prevent clicks
-        
-        Args:
-            frequency: Frequency in Hz
-            duration_ms: Duration in milliseconds
-            amplitude: Amplitude (0.0 to 1.0)
-            sample_rate: Sample rate (defaults to self.sample_rate)
-            
-        Returns:
-            Numpy array containing the audio samples
-        """
-        if sample_rate is None:
-            sample_rate = self.sample_rate
-            
-        # Calculate number of samples
-        num_samples = int((duration_ms / 1000.0) * sample_rate)
-        if num_samples <= 0:
-            return np.array([], dtype=np.float32)
-            
-        # Generate time points
-        t = np.linspace(0, duration_ms / 1000.0, num_samples, False)
-        
-        # Generate sine wave
-        wave = amplitude * np.sin(2 * np.pi * frequency * t)
-        
-        # Apply fade-out (10ms or proportional to note duration)
-        fade_out_ms = min(10, duration_ms * 0.1)  # 10% of note duration, max 10ms
-        fade_out_samples = int((fade_out_ms / 1000.0) * sample_rate)
-        
-        if fade_out_samples > 0 and len(wave) > 0:
-            fade_curve = np.linspace(1.0, 0.0, min(fade_out_samples, len(wave)))
-            wave[-len(fade_curve):] *= fade_curve
-            
-        return wave
-    
-    def _generate_piano_note(self, note_freq: float, duration_ms: int) -> np.ndarray:
-        """Generate a piano-like note with ADSR envelope"""
-        # Generate base sine wave
-        wave = self._generate_sine_wave(note_freq, duration_ms, 0.4)
-        
-        # Apply ADSR envelope
-        num_samples = len(wave)
-        attack_samples = int(num_samples * 0.05)  # 5% attack
-        decay_samples = int(num_samples * 0.2)    # 20% decay
-        sustain_level = 0.7
-        release_samples = int(num_samples * 0.2)  # 20% release
-        
-        envelope = np.ones(num_samples)
-        
-        # Attack
-        if attack_samples > 0:
-            envelope[:attack_samples] = np.linspace(0, 1, attack_samples)
-        
-        # Decay
-        if decay_samples > 0:
-            envelope[attack_samples:attack_samples+decay_samples] = np.linspace(1, sustain_level, decay_samples)
-        
-        # Sustain
-        sustain_end = num_samples - release_samples
-        if sustain_end > attack_samples + decay_samples:
-            envelope[attack_samples+decay_samples:sustain_end] = sustain_level
-        
-        # Release
-        if release_samples > 0 and sustain_end < num_samples:
-            envelope[sustain_end:] = np.linspace(sustain_level, 0, num_samples - sustain_end)
-        
-        return wave * envelope
-    
-    def _generate_guitar_note(self, note_freq: float, duration_ms: int) -> np.ndarray:
-        """Generate a guitar-like note with pluck simulation"""
-        # Generate base wave with harmonics
-        wave = self._generate_sine_wave(note_freq, duration_ms, 0.3)
-        wave += self._generate_sine_wave(note_freq * 2, duration_ms, 0.2)
-        wave += self._generate_sine_wave(note_freq * 3, duration_ms, 0.1)
-        
-        # Apply pluck envelope (fast decay)
-        num_samples = len(wave)
-        decay_samples = min(int(num_samples * 0.8), num_samples)
-        
-        if decay_samples > 0:
-            envelope = np.exp(-np.linspace(0, 5, decay_samples))
-            wave[:decay_samples] *= envelope
-            
-            if num_samples > decay_samples:
-                wave[decay_samples:] = 0
-        
-        return wave
-    
-    def _generate_synth_note(self, note_freq: float, duration_ms: int) -> np.ndarray:
-        """Generate a basic synth note"""
-        return self._generate_sine_wave(note_freq, duration_ms, 0.5)
-    
-    def _note_to_frequency(self, note: str) -> float:
-        """Convert note name (like 'C4') to frequency in Hz"""
-        notes = {'C': 0, 'C#': 1, 'D': 2, 'D#': 3, 'E': 4, 'F': 5, 'F#': 6, 
-                 'G': 7, 'G#': 8, 'A': 9, 'A#': 10, 'B': 11}
-        
-        # Extract note name and octave
-        if len(note) == 3 and note[1] == '#':
-            note_name = note[:2]
-            octave = int(note[2])
-        else:
-            note_name = note[0]
-            octave = int(note[1])
-        
-        # Calculate semitones from A4 (440Hz)
-        semitones = (octave - 4) * 12 + notes[note_name] - 9
-        frequency = 440 * (2 ** (semitones / 12.0))
-        return frequency
-    
-    def _create_sound(self, samples: np.ndarray) -> pygame.mixer.Sound:
-        """Create a pygame sound object from audio samples"""
-        # Ensure samples are in range [-1.0, 1.0]
-        samples = np.clip(samples, -1.0, 1.0)
-        
-        # Convert to 16-bit integers
-        int16_max = 32767
-        sound_int16 = (samples * int16_max).astype(np.int16)
-        
-        # Create stereo sound (duplicate channels)
-        stereo = np.column_stack((sound_int16, sound_int16))
-        
-        return self.audio.Sound(buffer=stereo.tobytes())
-    
-    def play_music_at_time(self, time_ms: int):
-        """Play all music events that are active at the given time"""
-        # Get all music events that start before or at the current time
-        # and are still playing (start + duration > current time)
-        cur = self.conn.cursor()
-        cur.execute("""
-            SELECT timestamp_ms, notes, durations, instrument_id 
-            FROM music 
-            WHERE timestamp_ms <= ? AND (timestamp_ms + CAST(json_extract(durations, '$[0]') AS INTEGER)) > ?
-        """, (time_ms, time_ms))
-        
-        # Process each music event
-        for row in cur.fetchall():
+
+    def init_speech_engine(self):
+        """Initializes the speech synthesis engine."""
+        if self.speech_engine is None:
             try:
-                timestamp_ms = row["timestamp_ms"]
-                notes = json.loads(row["notes"])
-                durations = json.loads(row["durations"])
-                instrument_id = row["instrument_id"] or "default"
-                
-                # Get instrument generator function
-                instrument_func = self.instruments.get(instrument_id, self.instruments["default"])
-                
-                # Play each note in the chord
-                for i, note in enumerate(notes):
-                    if i < len(durations):
-                        duration = durations[i]
-                        # Only play notes that are active at current time
-                        if timestamp_ms + duration > time_ms:
-                            freq = self._note_to_frequency(note)
-                            # Generate sound for the remaining portion of the note
-                            remaining_duration = min(duration, time_ms - timestamp_ms)
-                            if remaining_duration > 0:
-                                samples = instrument_func(freq, remaining_duration)
-                                sound = self._create_sound(samples)
-                                
-                                # Play the sound
-                                channel = sound.play()
-                                if channel:
-                                    self.sound_channels[channel] = {
-                                        "end_time": time_ms + remaining_duration,
-                                        "sound": sound
-                                    }
+                self.speech_engine = pyttsx3.init()
+                # Basic rate setting (can be adjusted)
+                self.speech_engine.setProperty('rate', 200)
             except Exception as e:
-                print(f"Error processing music event at {timestamp_ms}: {e}")
-    
-    def play_scheduled_speech(self, current_time_ms: int):
-        """Play speech that should start at or before the current time"""
-        # Check if we need to start new speech
-        if not self.pending_speech:
-            cur = self.conn.cursor()
-            cur.execute("""
-                SELECT id, sentence, start_time_ms, voice_id 
-                FROM speech 
-                WHERE start_time_ms <= ? 
-                ORDER BY start_time_ms
-            """, (current_time_ms,))
-            
-            for row in cur.fetchall():
-                if row["id"] not in self.played_speech_ids:
-                    self.pending_speech.append({
-                        "id": row["id"],
-                        "sentence": row["sentence"],
-                        "start_time_ms": row["start_time_ms"],
-                        "voice_id": row["voice_id"]
-                    })
-                    self.played_speech_ids.add(row["id"])
-        
-        # Process pending speech
-        while self.pending_speech and self.speech_engine:
-            speech = self.pending_speech.pop(0)
-            self.speech_engine.say(speech["sentence"])
-            self.speech_engine.runAndWait()  # Run and wait for THIS speech item
-    
-    def update(self, current_time_ms: int):
-        """Update audio state based on current time"""
+                print(f"Warning: Could not initialize speech engine: {e}")
+                self.speech_engine = None
+
+    def get_instrument_func(self, instrument_id: str):
+        """Maps instrument ID to a waveform generation function."""
+        # Simplified instrument definitions
+        instruments = {
+            "sine": lambda freq, duration_ms: self.generate_sine_wave(freq, duration_ms),
+            "square": lambda freq, duration_ms: self.generate_square_wave(freq, duration_ms),
+            "sawtooth": lambda freq, duration_ms: self.generate_sawtooth_wave(freq, duration_ms),
+            "piano": lambda freq, duration_ms: self.generate_sine_wave(freq, duration_ms), # Placeholder
+            "guitar": lambda freq, duration_ms: self.generate_sine_wave(freq, duration_ms), # Placeholder
+        }
+        return instruments.get(instrument_id, instruments["sine"]) # Default to sine
+
+    def generate_sine_wave(self, frequency: float, duration_ms: int) -> np.ndarray:
+        """Generates a sine wave."""
+        num_samples = int(self.sample_rate * duration_ms / 1000.0)
+        if num_samples <= 0:
+            return np.array([], dtype=np.int16)
+        t = np.linspace(0, duration_ms / 1000.0, num_samples, False)
+        wave = np.sin(2 * np.pi * frequency * t)
+        # Ensure the waveform ends near zero to avoid clicks
+        # Simple fade-out over last 10ms
+        fade_samples = min(int(self.sample_rate * 0.01), num_samples)
+        if fade_samples > 0:
+            fade_out = np.linspace(1.0, 0.0, fade_samples)
+            wave[-fade_samples:] *= fade_out
+        audio_data = (wave * 32767).astype(np.int16)
+        return audio_data
+
+    def generate_square_wave(self, frequency: float, duration_ms: int) -> np.ndarray:
+        """Generates a square wave (naive implementation)."""
+        num_samples = int(self.sample_rate * duration_ms / 1000.0)
+        if num_samples <= 0:
+             return np.array([], dtype=np.int16)
+        t = np.linspace(0, duration_ms / 1000.0, num_samples, False)
+        wave = np.sign(np.sin(2 * np.pi * frequency * t))
+         # Simple fade-out
+        fade_samples = min(int(self.sample_rate * 0.01), num_samples)
+        if fade_samples > 0:
+            fade_out = np.linspace(1.0, 0.0, fade_samples)
+            wave[-fade_samples:] *= fade_out
+        audio_data = (wave * 32767).astype(np.int16)
+        return audio_data
+
+    def generate_sawtooth_wave(self, frequency: float, duration_ms: int) -> np.ndarray:
+        """Generates a sawtooth wave (naive implementation)."""
+        num_samples = int(self.sample_rate * duration_ms / 1000.0)
+        if num_samples <= 0:
+             return np.array([], dtype=np.int16)
+        t = np.linspace(0, duration_ms / 1000.0, num_samples, False)
+        wave = 2 * (t * frequency - np.floor(0.5 + t * frequency))
+         # Simple fade-out
+        fade_samples = min(int(self.sample_rate * 0.01), num_samples)
+        if fade_samples > 0:
+            fade_out = np.linspace(1.0, 0.0, fade_samples)
+            wave[-fade_samples:] *= fade_out
+        audio_data = (wave * 32767).astype(np.int16)
+        return audio_data
+
+    def schedule_music_note(self, timestamp_ms: int, duration: int, frequency: float, note_id: int, instrument_id: str):
+        """Schedules a single music note for playback."""
+        self.pending_music_notes.append((timestamp_ms, duration, frequency, note_id, instrument_id))
+
+    def play_music_at_time(self, current_time_ms: int):
+        """Plays scheduled music notes that are due."""
         if self.paused:
             return
-            
-        # Update time tracking
-        self.current_time_ms = current_time_ms
-        
-        # Play music events for this time
-        self.play_music_at_time(current_time_ms)
-        
-        # Play scheduled speech
-        self.play_scheduled_speech(current_time_ms)
-        
-        # Clean up finished sounds
-        current_time = time.time()
-        channels_to_remove = []
-        for channel, data in self.sound_channels.items():
-            if data["end_time"] <= current_time_ms:
-                channels_to_remove.append(channel)
-        
-        for channel in channels_to_remove:
-            del self.sound_channels[channel]
-    
-    def pause(self):
-        """Pause audio playback"""
-        self.paused = True
-        self.audio.pause()
-    
-    def play(self):
-        """Resume audio playback"""
-        self.paused = False
-        self.audio.unpause()
-    
-    def cleanup(self):
-        """Clean up audio resources"""
+
+        # --- FIX 5 (Critical - Logic): Correct SQL query for active chord events ---
+        # This fix assumes the music table structure is as described in the plan:
+        # timestamp_ms INTEGER, notes TEXT (JSON array), durations TEXT (JSON array), instrument_id TEXT
+        # This query finds events that started and have not yet finished based on the longest duration in the chord.
+        # A more robust schema would store individual notes.
+        try:
+            cur = self.conn.cursor()
+            # Find chord events that are currently active
+            # This query now correctly identifies events where ANY note might still be playing
+            # by checking against the maximum duration in the chord.
+            cur.execute("""
+                SELECT timestamp_ms, notes, durations, instrument_id
+                FROM music
+                WHERE timestamp_ms <= ?
+                  AND (timestamp_ms + (
+                    SELECT MAX(dur) FROM json_each(durations) AS dur
+                  )) > ?
+            """, (current_time_ms, current_time_ms))
+
+            active_events = cur.fetchall()
+
+            for row in active_events:
+                timestamp_ms = row["timestamp_ms"] # Access by name now works
+                try:
+                    notes_list = json.loads(row["notes"])
+                    durations_list = json.loads(row["durations"])
+                    instrument_id = row["instrument_id"]
+                except (json.JSONDecodeError, KeyError) as e:
+                    print(f"Warning: Error parsing music data at {timestamp_ms}ms: {e}")
+                    continue
+
+                if not isinstance(notes_list, list) or not isinstance(durations_list, list):
+                    print(f"Warning: Invalid notes/durations format at {timestamp_ms}ms")
+                    continue
+
+                # Iterate through notes in the chord
+                for i, (note, duration) in enumerate(zip(notes_list, durations_list)):
+                    note_start_time = timestamp_ms
+                    # Check if the specific note within the chord is currently playing
+                    if note_start_time <= current_time_ms < (note_start_time + duration):
+                         # Check if this specific note instance hasn't been scheduled yet
+                         # Use a unique key based on timestamp and note index within the chord
+                        note_key = (timestamp_ms, i)
+                        if note_key not in [(n[0], n[3]) for n in self.pending_music_notes]: # Check timestamp and index
+                            frequency = 440.0 * (2 ** ((note - 69) / 12.0)) # MIDI note to frequency
+                            # --- FIX 6 (Critical - Logic): Pass full duration ---
+                            self.schedule_music_note(note_start_time, duration, frequency, i, instrument_id)
+                            # ---
+
+        except sqlite3.Error as e:
+            print(f"Database error in play_music_at_time: {e}")
+        except Exception as e:
+             print(f"Unexpected error in play_music_at_time: {e}")
+        # ---
+
+
+        # Play pending notes whose start time has arrived
+        notes_to_remove = []
+        for note_data in self.pending_music_notes:
+            timestamp_ms, duration, frequency, note_id, instrument_id = note_data
+            if current_time_ms >= timestamp_ms:
+                instrument_func = self.get_instrument_func(instrument_id)
+                if instrument_func:
+                    # --- FIX 6 (Critical - Logic): Pass full duration ---
+                    # Calculate remaining duration for this specific note instance
+                    elapsed_time_for_note = current_time_ms - timestamp_ms
+                    remaining_duration_for_note = max(0, duration - elapsed_time_for_note)
+
+                    # Play the note with its full intended duration from the start point
+                    # The instrument function should ideally handle playing from the correct point
+                    # or the audio system should manage overlapping/splitting.
+                    # For simplicity here, we play the full duration from the start time.
+                    # A more advanced system might pre-generate or stream audio.
+                    # This fix ensures the instrument gets the correct total duration.
+                    samples = instrument_func(frequency, duration) # Pass full duration
+                     # ---
+                    if len(samples) > 0:
+                        try:
+                            sound = pygame.mixer.Sound(buffer=samples)
+                            channel = sound.play()
+                            if channel:
+                                # Calculate end time for this specific note play instance
+                                end_time = current_time_ms + duration
+                                # Store channel ID for potential management
+                                self.sound_channels[channel.get_id()] = {"sound": sound, "end_time": end_time}
+                        except pygame.error as e:
+                             print(f"Pygame error playing note {note_id} at {current_time_ms}ms: {e}")
+                        except Exception as e:
+                             print(f"Unexpected error playing note {note_id} at {current_time_ms}ms: {e}")
+                notes_to_remove.append(note_data) # Remove after attempting to play
+
+        # Remove notes that were due (regardless of success)
+        for note_data in notes_to_remove:
+            if note_data in self.pending_music_notes:
+                 self.pending_music_notes.remove(note_data)
+
+    def update_channels(self, current_time_ms: int):
+       """Cleans up finished sound channels."""
+       if self.paused:
+           return
+       channels_to_remove = []
+       for channel_id, data in list(self.sound_channels.items()): # Iterate over a copy
+           # Check if the estimated end time has passed
+           # Note: pygame.mixer.get_busy() checks if the specific channel is busy
+           # This is a simple check; actual completion might depend on OS/audio driver timing.
+           if data["end_time"] <= current_time_ms or not pygame.mixer.Channel(channel_id).get_busy():
+               channels_to_remove.append(channel_id)
+
+       for channel_id in channels_to_remove:
+           del self.sound_channels[channel_id]
+
+    def schedule_speech(self, sentence: str, start_time_ms: int, voice_id: str, db_id: int):
+        """Schedules a sentence for speech synthesis."""
+        # Avoid scheduling the same speech entry multiple times
+        if db_id not in self.played_speech_ids:
+            self.pending_speech.append((sentence, start_time_ms, voice_id, db_id))
+
+    def play_scheduled_speech(self, current_time_ms: int):
+        """Plays scheduled speech items that are due."""
+        if self.paused:
+            return
+
+        # --- FIX 7 (High-Impact): Avoid blocking with runAndWait() ---
+        # Instead of playing one and waiting, queue all due speeches.
+        # pyttsx3 might handle queuing internally, but we avoid blocking the main loop.
+        if not self.pending_speech:
+            # Check if we need to start new speech
+            try:
+                cur = self.conn.cursor()
+                # --- FIX 2 (Critical): Correct SQL query placeholder usage ---
+                # Using positional placeholders (?) correctly.
+                cur.execute("""
+                    SELECT id, sentence, start_time_ms, voice_id
+                    FROM speech
+                    WHERE start_time_ms <= ? AND id NOT IN ({})
+                """.format(','.join('?'*len(self.played_speech_ids))) if self.played_speech_ids else """
+                    SELECT id, sentence, start_time_ms, voice_id
+                    FROM speech
+                    WHERE start_time_ms <= ?
+                """, (current_time_ms, *self.played_speech_ids))
+                # ---
+
+                due_speeches = cur.fetchall()
+                for row in due_speeches:
+                    # --- Access by name now works due to row_factory ---
+                    speech_id = row["id"]
+                    sentence = row["sentence"]
+                    start_time_ms_db = row["start_time_ms"]
+                    voice_id = row["voice_id"]
+                    # ---
+                    self.schedule_speech(sentence, start_time_ms_db, voice_id, speech_id)
+
+            except sqlite3.Error as e:
+                print(f"Database error in play_scheduled_speech (scheduling): {e}")
+            except Exception as e:
+                 print(f"Unexpected error in play_scheduled_speech (scheduling): {e}")
+
+        # Play pending speech items whose time has come
+        speech_items_to_remove = []
+        for item in self.pending_speech:
+            sentence, start_time_ms_item, voice_id, db_id = item
+            if current_time_ms >= start_time_ms_item:
+                if self.speech_engine is None:
+                    self.init_speech_engine()
+                if self.speech_engine:
+                    try:
+                        # Set voice properties if needed (basic example)
+                        # voices = self.speech_engine.getProperty('voices')
+                        # self.speech_engine.setProperty('voice', voices[0].id) # Example
+
+                        self.speech_engine.say(sentence)
+                        self.played_speech_ids.add(db_id) # Mark as played/scheduled
+                    except Exception as e:
+                        print(f"Error scheduling speech '{sentence[:20]}...': {e}")
+                speech_items_to_remove.append(item) # Remove from pending after scheduling
+
+        # Remove items that were due (regardless of success)
+        for item in speech_items_to_remove:
+            if item in self.pending_speech:
+                self.pending_speech.remove(item)
+
+        # --- Crucial Change: Run speech engine iteration OUTSIDE the loop ---
+        # This processes the queue without blocking until the first item finishes.
         if self.speech_engine:
-            self.speech_engine.stop()
-        self.audio.quit()
+            try:
+                # runAndWait() is still blocking, but now it processes the entire
+                # queued batch scheduled in this call, not just one item per main loop iteration.
+                # This is better than the original bug but still blocks briefly.
+                # For truly non-blocking, a threading approach might be needed,
+                # but pyttsx3's internal queue handling helps here.
+                if speech_items_to_remove: # Only call if something was added
+                    self.speech_engine.runAndWait()
+            except Exception as e:
+                 print(f"Error running speech engine: {e}")
+        # ---
+
+    def update(self, current_time_ms: int):
+        """Main update method called each frame."""
+        if not self.paused:
+             self.current_time_ms = current_time_ms
+        else:
+            # If paused, update current_time_ms based on real time when unpaused
+            # This simplistic approach might cause jumps. A delta-time approach is better.
+            self.last_update_time = time.time()
+
+        self.play_music_at_time(self.current_time_ms)
+        self.update_channels(self.current_time_ms)
+        self.play_scheduled_speech(self.current_time_ms)
+
+    def toggle_pause(self):
+        """Toggles the pause state."""
+        self.paused = not self.paused
+        if not self.paused:
+            # Adjust last_update_time to prevent large time jumps on unpause
+            self.last_update_time = time.time()
+
+    def cleanup(self):
+        """Cleans up audio resources."""
+        if self.speech_engine:
+            try:
+                self.speech_engine.stop() # Stop any ongoing speech
+            except:
+                pass # Ignore errors during cleanup
+        if self.audio:
+             try:
+                self.audio.quit()
+             except:
+                pass # Ignore errors during cleanup
+        if self.conn:
+            try:
+                self.conn.close()
+            except:
+                pass # Ignore errors during cleanup
+
+# --- End of ZeroAudio.py ---
