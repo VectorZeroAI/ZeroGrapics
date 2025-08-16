@@ -3,11 +3,10 @@
 # lines(uuid TEXT, endpoints TEXT, pull_point TEXT, pull_power REAL, movements TEXT)
 # shapes(uuid TEXT, point_uuids TEXT, line_uuids TEXT, color TEXT, movements TEXT) # FIXED: Added uuid
 # music(timestamp_ms INTEGER, notes TEXT, durations TEXT, instrument_id TEXT)
-# speech(id INTEGER, sentence TEXT, start_time_ms INTEGER, voice_id TEXT)
+# speech(id INTEGER, speech TEXT, start_time_ms INTEGER, voice_id TEXT)
 # - Supports two field formats:
 #   * JSON-like arrays: [x,y,z] or [ [...],... ]
 #   * semicolon-separated: "x;y;z" or "(x;y;[a;b;c]);..." etc.
-
 import sqlite3
 import json
 import uuid
@@ -29,7 +28,7 @@ def lerp_vec(a: Tuple[float,float,float], b: Tuple[float,float,float], t: float)
         lerp(a[2], b[2], t)
     )
 
-def parse_vector3_from_any(s: Any) -> Tuple[float, float, float]:
+def parse_vector3(s: Any) -> Tuple[float, float, float]:
     """Accepts: JSON list/tuple or string like "[x,y,z]" or "x;y;z" or "(x;y;z)" or "x,y,z"
     Returns tuple (x,y,z) or raises ValueError."""
     if s is None:
@@ -39,23 +38,41 @@ def parse_vector3_from_any(s: Any) -> Tuple[float, float, float]:
     if isinstance(s, (int, float)):
         # scalar -> replicate? not allowed
         raise ValueError("Scalar cannot be vector3")
-    
     # string fallback
     txt = str(s).strip()
     j = try_load_json(txt)
     if j is not None and isinstance(j, (list, tuple)) and len(j) >= 3:
         return float(j[0]), float(j[1]), float(j[2])
-    
     # remove parentheses/brackets
     for ch in '()[]{}':
         txt = txt.replace(ch, '')
-    
     # split by comma or semicolon
     parts = [p.strip() for p in re.split(r'[,;]', txt) if p.strip() != '']
     if len(parts) >= 3:
         return float(parts[0]), float(parts[1]), float(parts[2])
-    
     raise ValueError(f"Cannot parse '{s}' as vector3")
+
+def parse_uuid_list(s: Any) -> List[str]:
+    """Parse a list of UUIDs from various formats"""
+    if s is None:
+        return []
+    if isinstance(s, (list, tuple)):
+        return [str(x) for x in s]
+    txt = str(s).strip()
+    j = try_load_json(txt)
+    if j is not None and isinstance(j, (list, tuple)):
+        return [str(x) for x in j]
+    # Clean up formatting characters
+    for ch in '()[]{}':
+        txt = txt.replace(ch, '')
+    # Split by delimiters
+    if ';' in txt:
+        return [p.strip() for p in txt.split(';') if p.strip() != '']
+    if ',' in txt:
+        return [p.strip() for p in txt.split(',') if p.strip() != '']
+    if txt == '':
+        return []
+    return [txt]
 
 def try_load_json(s: str) -> Optional[Any]:
     try:
@@ -63,7 +80,7 @@ def try_load_json(s: str) -> Optional[Any]:
     except:
         return None
 
-def normalize_uuid_list_json( Any) -> str:
+def normalize_uuid_list_json(data: Any) -> str:
     """Ensure data is in proper JSON format for uuid lists"""
     if isinstance(data, str):
         # Try to see if it's already JSON
@@ -82,16 +99,15 @@ def normalize_uuid_list_json( Any) -> str:
 def normalize_vector3_json(data: Any) -> str:
     """Ensure data is in proper JSON format for vector3"""
     try:
-        x, y, z = parse_vector3_from_any(data)
+        x, y, z = parse_vector3(data)
         return json.dumps([x, y, z])
     except:
         return json.dumps([0.0, 0.0, 0.0])
 
-def normalize_line_changes_json( Any) -> str:
+def normalize_line_changes_json(data: Any) -> str:
     """Ensure data is in proper JSON format for line changes"""
     if data is None:
         return json.dumps([])
-    
     if isinstance(data, str):
         # Try to see if it's already JSON
         try:
@@ -103,7 +119,6 @@ def normalize_line_changes_json( Any) -> str:
             s = data.strip()
             if s.startswith('{') and s.endswith('}'):
                 s = s[1:-1].strip()
-            
             cur = ""
             depth = 0
             for ch in s:
@@ -117,7 +132,6 @@ def normalize_line_changes_json( Any) -> str:
                     cur = ""
             if cur.strip() != "":
                 segments.append(cur.strip())
-            
             out = []
             for seg in segments:
                 parts = [p.strip() for p in seg.split(';') if p.strip() != '']
@@ -125,13 +139,12 @@ def normalize_line_changes_json( Any) -> str:
                     try:
                         start = int(float(parts[0]))
                         dur = int(float(parts[1]))
-                        x, y, z = parse_vector3_from_any(parts[2])
+                        x, y, z = parse_vector3(parts[2])
                         p = float(parts[3])
                         out.append([start, dur, [x, y, z, p]])
                     except:
                         continue
             return json.dumps(out)
-    
     elif isinstance(data, (list, tuple)):
         out = []
         for item in data:
@@ -147,7 +160,6 @@ def normalize_line_changes_json( Any) -> str:
                     continue
                 out.append([start, dur, [x, y, z, p]])
         return json.dumps(out)
-    
     return json.dumps([])
 
 def parse_movements_field(text: str) -> List[Tuple[int,int,Tuple[float,float,float]]]:
@@ -155,7 +167,6 @@ def parse_movements_field(text: str) -> List[Tuple[int,int,Tuple[float,float,flo
     [ [start_ms, duration_ms, [x,y,z]], ... ]"""
     if text is None:
         return []
-    
     if isinstance(text, (list, tuple)):
         out = []
         for item in text:
@@ -171,11 +182,9 @@ def parse_movements_field(text: str) -> List[Tuple[int,int,Tuple[float,float,flo
                     continue
                 out.append((start, dur, (x, y, z)))
         return out
-    
     txt = str(text).strip()
     if txt == "":
         return []
-    
     # find bracketed segments
     segments = re.findall(r'[\(\[\{]([^}\]\)]*)[\)\]\}]', txt)
     out = []
@@ -191,16 +200,13 @@ def parse_movements_field(text: str) -> List[Tuple[int,int,Tuple[float,float,flo
                 out.append((start, dur, (x, y, z)))
             except Exception:
                 continue
-    
     # Fallback: semicolon-separated format
     s = text.strip()
     if s == "":
         return []
-    
     # Handle outer curly braces
     if s.startswith('{') and s.endswith('}'):
         s = s[1:-1].strip()
-    
     segments = []
     cur = ""
     depth = 0
@@ -216,7 +222,6 @@ def parse_movements_field(text: str) -> List[Tuple[int,int,Tuple[float,float,flo
             cur = ""
     if cur.strip() != "":
         segments.append(cur.strip())
-    
     out = []
     for seg in segments:
         seg_clean = seg
@@ -244,7 +249,6 @@ def parse_line_changes_field(text: str) -> List[Tuple[int,int,Tuple[float,float,
     [ [start_ms, duration_ms, [x,y,z,power]], ... ]"""
     if text is None:
         return []
-    
     if isinstance(text, (list, tuple)):
         out = []
         for item in text:
@@ -260,11 +264,9 @@ def parse_line_changes_field(text: str) -> List[Tuple[int,int,Tuple[float,float,
                     continue
                 out.append((start, dur, (x, y, z), float(p)))
         return out
-    
     txt = str(text).strip()
     if txt == "":
         return []
-    
     segments = re.findall(r'[\(\[\{]([^}\]\)]*)[\)\]\}]', txt)
     out = []
     for seg in segments:
@@ -280,16 +282,13 @@ def parse_line_changes_field(text: str) -> List[Tuple[int,int,Tuple[float,float,
                 out.append((start, dur, (x, y, z), float(p)))
             except:
                 continue
-    
     # Fallback: semicolon-separated format
     s = text.strip()
     if s == "":
         return []
-    
     # Handle outer curly braces
     if s.startswith('{') and s.endswith('}'):
         s = s[1:-1].strip()
-    
     segments = []
     cur = ""
     depth = 0
@@ -305,7 +304,6 @@ def parse_line_changes_field(text: str) -> List[Tuple[int,int,Tuple[float,float,
             cur = ""
     if cur.strip() != "":
         segments.append(cur.strip())
-    
     out = []
     for seg in segments:
         seg_clean = seg
@@ -334,7 +332,6 @@ def parse_color_changes(text: str) -> List[Tuple[int,int,Tuple[float,float,float
     [ [start_ms, duration_ms, [r,g,b]], ... ]"""
     if text is None:
         return []
-    
     if isinstance(text, (list, tuple)):
         out = []
         for item in text:
@@ -342,14 +339,12 @@ def parse_color_changes(text: str) -> List[Tuple[int,int,Tuple[float,float,float
                 start = int(item[0])
                 dur = int(item[1])
                 col = item[2]
-                r, g, b = parse_vector3_from_any(col)
+                r, g, b = parse_vector3(col)
                 out.append([start, dur, [r, g, b]])
         return out
-    
     txt = str(text).strip()
     if txt == "":
         return []
-    
     segments = re.findall(r'[\(\[\{]([^}\]\)]*)[\)\]\}]', txt)
     out = []
     for seg in segments:
@@ -364,16 +359,13 @@ def parse_color_changes(text: str) -> List[Tuple[int,int,Tuple[float,float,float
                 out.append([start, dur, [r, g, b]])
             except:
                 continue
-    
     # Fallback: semicolon-separated format
     s = text.strip()
     if s == "":
         return []
-    
     # Handle outer curly braces
     if s.startswith('{') and s.endswith('}'):
         s = s[1:-1].strip()
-    
     segments = []
     cur = ""
     depth = 0
@@ -389,7 +381,6 @@ def parse_color_changes(text: str) -> List[Tuple[int,int,Tuple[float,float,float
             cur = ""
     if cur.strip() != "":
         segments.append(cur.strip())
-    
     out = []
     for seg in segments:
         seg_clean = seg
@@ -412,42 +403,13 @@ def parse_color_changes(text: str) -> List[Tuple[int,int,Tuple[float,float,float
                 continue
     return sorted(out, key=lambda x: x[0])
 
-def extract_table_block(text: str, table_marker: str) -> str:
-    """Return the block of text after the first occurrence of table_marker
-    (e.g. "TABLE1") up to the next TABLE[1-3] marker or EOF.
-    Examples:
-    extract_table_block(raw_text, "TABLE1")
-    Will return the text immediately after "TABLE1" (case-insensitive)
-    until the next "TABLE1/2/3" header or end of file."""
-    if not text or not table_marker:
-        return ""
-    
-    # Find the marker (case-insensitive)
-    m = re.search(re.escape(table_marker), text, re.IGNORECASE)
-    if not m:
-        return ""
-    
-    start = m.end()
-    
-    # Find next TABLE1|TABLE2|TABLE3 header after the marker
-    nxt = re.search(r'\bTABLE[123]\b', text[start:], re.IGNORECASE)
-    if nxt:
-        return text[start:start+nxt.start()].strip()
-    else:
-        return text[start:].strip()
-
-def parse_legacy_rows(text: str) -> List[List[str]]:
-    """Parse legacy text format into rows of fields.
-    Legacy format: one row per line, fields separated by '|'
-    Empty lines and comment lines (starting with '#') are ignored."""
-    rows = []
-    for line in text.split('\n'):
-        line = line.strip()
-        if not line or line.startswith('#'):
-            continue
-        fields = [f.strip() for f in line.split('|')]
-        rows.append(fields)
-    return rows
+def validate_movements(movements):
+    """Validate that movements do not overlap"""
+    sorted_movements = sorted(movements, key=lambda m: m[0])  # Sort by start time
+    for i in range(1, len(sorted_movements)):
+        prev_end = sorted_movements[i-1][0] + sorted_movements[i-1][1]
+        if sorted_movements[i][0] < prev_end:
+            raise ValueError(f"Overlapping movements detected at {sorted_movements[i][0]}ms")
 
 class ZeroInterpreter:
     def __init__(self, db_path: str):
@@ -460,16 +422,20 @@ class ZeroInterpreter:
     def load_all_data(self):
         """Load all data from the database into memory structures"""
         cur = self.conn.cursor()
-        
         # Load points
         try:
             rows = cur.execute("SELECT uuid, coordinates, connected_points, movements FROM points").fetchall()
             for r in rows:
                 try:
                     uuid = str(r["uuid"])
-                    base = parse_vector3_from_any(r["coordinates"])
+                    base = parse_vector3(r["coordinates"])
                     conns = parse_uuid_list(r["connected_points"]) if r["connected_points"] is not None else []
                     moves = parse_movements_field(r["movements"]) if r["movements"] is not None else []
+                    
+                    # Validate movements don't overlap
+                    if moves:
+                        validate_movements(moves)
+                    
                     self.points[uuid] = {
                         "base": base,
                         "connections": conns,
@@ -490,6 +456,13 @@ class ZeroInterpreter:
                     pull_base = parse_vector3(r["pull_point"])
                     power_base = float(r["pull_power"]) if r["pull_power"] is not None else 1.0
                     changes = parse_line_changes_field(r["movements"]) if r["movements"] is not None else []
+                    
+                    # Validate line changes don't overlap
+                    if changes:
+                        # Convert to format validate_movements expects
+                        simplified_changes = [(ch[0], ch[1]) for ch in changes]
+                        validate_movements(simplified_changes)
+                    
                     self.lines[uuid] = {
                         "endpoints": endpoints,
                         "pull_base": pull_base,
@@ -515,6 +488,13 @@ class ZeroInterpreter:
                     except (ValueError, TypeError):
                         fill = (1.0, 1.0, 1.0)
                     color_changes = parse_color_changes(r["movements"]) if r["movements"] is not None else []
+                    
+                    # Validate color changes don't overlap
+                    if color_changes:
+                        # Convert to format validate_movements expects
+                        simplified_changes = [(ch[0], ch[1]) for ch in color_changes]
+                        validate_movements(simplified_changes)
+                    
                     self.shapes[uuid] = {
                         "points": pts,
                         "lines": lns,
@@ -535,20 +515,19 @@ class ZeroInterpreter:
             List of music events in the time range"""
         if end_time_ms is None:
             end_time_ms = start_time_ms
-        
         cur = self.conn.cursor()
         cur.execute("""
-            SELECT timestamp_ms, notes, durations, instrument_id 
+            SELECT id, timestamp_ms, notes, durations, instrument_id 
             FROM music 
             WHERE timestamp_ms <= ? AND (timestamp_ms + CAST(json_extract(durations, '$[0]') AS INTEGER)) > ?
         """, (end_time_ms, start_time_ms))
-        
         events = []
         for row in cur.fetchall():
             try:
                 notes = json.loads(row["notes"])
                 durations = json.loads(row["durations"])
                 events.append({
+                    "id": row["id"],
                     "timestamp_ms": row["timestamp_ms"],
                     "notes": notes,
                     "durations": durations,
@@ -556,7 +535,6 @@ class ZeroInterpreter:
                 })
             except Exception as e:
                 print(f"Warning: skipping malformed music event at {row['timestamp_ms']}: {e}")
-        
         return events
     
     def get_speech_events(self, start_time_ms: int, end_time_ms: int = None) -> List[Dict[str, Any]]:
@@ -568,14 +546,12 @@ class ZeroInterpreter:
             List of speech events in the time range"""
         if end_time_ms is None:
             end_time_ms = start_time_ms
-        
         cur = self.conn.cursor()
         cur.execute("""
             SELECT id, sentence, start_time_ms, voice_id 
             FROM speech 
             WHERE start_time_ms >= ? AND start_time_ms <= ?
         """, (start_time_ms, end_time_ms))
-        
         events = []
         for row in cur.fetchall():
             events.append({
@@ -585,7 +561,7 @@ class ZeroInterpreter:
                 "voice": row["voice_id"]
             })
         return events
-    
+
     # -# compute point position at tick# -
     def point_position_at(self, uuid: str, tick_ms: int) -> Tuple[float,float,float]:
         """Calculate point position at given time
@@ -594,33 +570,26 @@ class ZeroInterpreter:
         rec = self.points.get(uuid)
         if rec is None:
             raise KeyError(f"Point {uuid} not found")
-        
         base = rec["base"]
         movements = rec["movements"]
         current = base
-        
         for m in movements:
             start, dur, target = m
             end = start + dur
-            
             # Skip movements that haven't started yet
             if tick_ms < start:
                 continue
-                
             # Instant movement
             if dur <= 0:
                 current = target
                 continue
-                
             # After movement completes
             if tick_ms >= end:
                 current = target
                 continue
-                
             # During movement
             progress = (tick_ms - start) / dur
             current = lerp_vec(current, target, clamp(progress))
-        
         return current
     
     # -# compute pull point and power at tick for a line# -
@@ -631,35 +600,28 @@ class ZeroInterpreter:
         rec = self.lines.get(line_uuid)
         if rec is None:
             raise KeyError(f"Line {line_uuid} not found")
-        
         base = rec["pull_base"]
         base_power = rec["power_base"]
         changes = rec["changes"]
         current_pos = base
         current_power = base_power
-        
         for ch in changes:
             start, dur, new_coords, new_power = ch
             end = start + dur
-            
             if tick_ms < start:
                 continue
-                
             if dur <= 0:
                 current_pos = new_coords
                 current_power = new_power
                 continue
-                
             if tick_ms >= end:
                 current_pos = new_coords
                 current_power = new_power
                 continue
-                
             progress = (tick_ms - start) / dur
             curp = lerp_vec(current_pos, new_coords, clamp(progress))
             curpow = lerp(current_power, new_power, clamp(progress))
             return curp, curpow
-        
         return current_pos, current_power
     
     # -# compute shape color at tick# -
@@ -670,33 +632,26 @@ class ZeroInterpreter:
         rec = self.shapes.get(shape_uuid)
         if rec is None:
             raise KeyError(f"Shape {shape_uuid} not found")
-        
         base = rec["fill_base"]
         changes = rec["color_changes"]
         current = base
-        
         for ch in changes:
             start, dur, newcol = ch
             end = start + dur
-            
             if tick_ms < start:
                 continue
-                
             if dur <= 0:
                 current = newcol
                 continue
-                
             if tick_ms >= end:
                 current = newcol
                 continue
-                
             progress = (tick_ms - start) / dur
             return (
                 lerp(current[0], newcol[0], clamp(progress)),
                 lerp(current[1], newcol[1], clamp(progress)),
                 lerp(current[2], newcol[2], clamp(progress))
             )
-        
         return current
     
     # -# Public: build full frame# -
@@ -717,17 +672,13 @@ class ZeroInterpreter:
             # Skip lines with insufficient endpoints
             if len(endpoints) < 2:
                 continue
-            
             u0, u1 = endpoints[0], endpoints[1]
             if u0 not in point_positions or u1 not in point_positions:
                 continue
-            
             p0 = point_positions[u0]
             p1 = point_positions[u1]
-            
             # Calculate pull point and power
             pull_point, pull_power = self.line_pull_at(uuid, tick_in_ms)
-            
             lines_out.append({
                 "uuid": uuid,
                 "points": [p0, p1],
@@ -740,19 +691,16 @@ class ZeroInterpreter:
         for uuid, rec in self.shapes.items():
             point_uuids = rec["points"]
             line_uuids = rec["lines"]
-            
             # Get positions for all points in the shape
             coords = []
             for p_uuid in point_uuids:
                 if p_uuid in point_positions:
                     coords.append(point_positions[p_uuid])
-            
             # Triangulate the polygon (simple fan triangulation for convex polygons)
             triangles = []
             if len(coords) >= 3:
                 for i in range(1, len(coords) - 1):
                     triangles.append([coords[0], coords[i], coords[i + 1]])
-            
             shapes_out.append({
                 "uuid": uuid,
                 "points": point_uuids,
