@@ -1,20 +1,19 @@
 #ZeroFiller.py
+
 """
 ZeroFiller.py
 - Reads LLM-generated .txt or .json that describes points, lines, shapes, and audio.
 - Parses the input (JSON preferred) or a legacy brace-based text format.
 - Validates fields and inserts rows into the SQLite DB produced by ZeroInit.py.
+
 Schema expected (graphics.db created by ZeroInit.py):
-  points(coordinates TEXT, uuid TEXT PRIMARY KEY, connected_points TEXT, movements TEXT)
-  lines(uuid TEXT PRIMARY KEY, endpoints TEXT, pull_point TEXT, pull_power REAL, movements TEXT)
-  shapes(uuid TEXT PRIMARY KEY, point_uuids TEXT, line_uuids TEXT, color TEXT, movements TEXT)  # FIXED: Added uuid
-  music(timestamp_ms INTEGER, notes TEXT, durations TEXT, instrument_id TEXT)
-  speech(id INTEGER, sentence TEXT, start_time_ms INTEGER, voice_id TEXT)
-Notes:
- - Movements / changes are saved to the DB as JSON strings (arrays) when possible.
- - Coordinates/colors are saved as JSON arrays [x,y,z].
- - For legacy semicolon formats the parser attempts to convert to normalized JSON storage.
+    points(coordinates TEXT, uuid TEXT PRIMARY KEY, connected_points TEXT, movements TEXT)
+    lines(uuid TEXT PRIMARY KEY, endpoints TEXT, pull_point TEXT, pull_power REAL, movements TEXT)
+    shapes(uuid TEXT PRIMARY KEY, point_uuids TEXT, line_uuids TEXT, color TEXT, movements TEXT)
+    music(id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp_ms INTEGER NOT NULL, notes TEXT, durations TEXT, instrument_id TEXT)
+    speech(id INTEGER PRIMARY KEY AUTOINCREMENT, sentence TEXT, start_time_ms INTEGER NOT NULL, voice_id TEXT)
 """
+
 import argparse
 import sqlite3
 import json
@@ -22,14 +21,16 @@ import os
 import re
 import sys
 import uuid
-from typing import List, Tuple, Any
+from typing import List, Tuple, Any, Dict, Union
 
 DB_FILE = "graphics.db"
 
 # -----------------------
 # Parsing helpers (lightweight, similar to interpreter)
 # -----------------------
+
 def try_load_json(s: str):
+    """Attempts to parse a string as JSON. Returns the parsed object or None."""
     try:
         return json.loads(s)
     except Exception:
@@ -65,10 +66,12 @@ def parse_vector3_from_any(s: Any) -> Tuple[float, float, float]:
     raise ValueError(f"Can't parse vector3 from: {s}")
 
 def normalize_vector3_json(s: Any) -> str:
+    """Parses a vector and returns it as a normalized JSON string."""
     v = parse_vector3_from_any(s)
     return json.dumps([float(v[0]), float(v[1]), float(v[2])])
 
 def parse_uuid_list_from_any(s: Any) -> List[str]:
+    """Parses a list of UUIDs from various formats (JSON, semicolon-separated, etc.)."""
     if s is None:
         return []
     if isinstance(s, (list, tuple)):
@@ -90,6 +93,7 @@ def parse_uuid_list_from_any(s: Any) -> List[str]:
     return [txt]
 
 def normalize_uuid_list_json(s: Any) -> str:
+    """Parses a UUID list and returns it as a normalized JSON string."""
     arr = parse_uuid_list_from_any(s)
     return json.dumps(arr)
 
@@ -147,6 +151,7 @@ def parse_movements_from_any(s: Any) -> List[List[Any]]:
     return out
 
 def normalize_movements_json(s: Any) -> str:
+    """Parses movements and returns them as a normalized JSON string."""
     arr = parse_movements_from_any(s)
     return json.dumps(arr)
 
@@ -188,6 +193,7 @@ def parse_line_changes_from_any(s: Any) -> List[List[Any]]:
     return out
 
 def normalize_line_changes_json(s: Any) -> str:
+    """Parses line changes and returns them as a normalized JSON string."""
     arr = parse_line_changes_from_any(s)
     return json.dumps(arr)
 
@@ -220,42 +226,46 @@ def parse_color_changes_from_any(s: Any) -> List[List[Any]]:
     return out
 
 def normalize_color_changes_json(s: Any) -> str:
+    """Parses color changes and returns them as a normalized JSON string."""
     arr = parse_color_changes_from_any(s)
     return json.dumps(arr)
 
 # -----------------------
-# High-level insertion (FIXED: Added uuid to shapes)
+# Database Insertion Functions
 # -----------------------
+
 def insert_point(conn: sqlite3.Connection, coords_json: str, uuid_str: str, connected_json: str, movements_json: str):
+    """Inserts or replaces a point entry."""
     cur = conn.cursor()
     cur.execute("INSERT OR REPLACE INTO points (coordinates, uuid, connected_points, movements) VALUES (?, ?, ?, ?)",
                 (coords_json, uuid_str, connected_json, movements_json))
     conn.commit()
 
 def insert_line(conn: sqlite3.Connection, uuid_str: str, endpoints_json: str, pull_json: str, power_float: float, changes_json: str):
+    """Inserts or replaces a line entry."""
     cur = conn.cursor()
     cur.execute("INSERT OR REPLACE INTO lines (uuid, endpoints, pull_point, pull_power, movements) VALUES (?, ?, ?, ?, ?)",
                 (uuid_str, endpoints_json, pull_json, power_float, changes_json))
     conn.commit()
 
-# FIXED: Added uuid parameter to shape insertion
 def insert_shape(conn: sqlite3.Connection, uuid_str: str, points_json: str, lines_json: str, color_json: str, color_changes_json: str):
+    """Inserts or replaces a shape entry."""
     cur = conn.cursor()
     cur.execute("INSERT OR REPLACE INTO shapes (uuid, point_uuids, line_uuids, color, movements) VALUES (?, ?, ?, ?, ?)",
                 (uuid_str, points_json, lines_json, color_json, color_changes_json))
     conn.commit()
 
 def insert_music(conn: sqlite3.Connection, timestamp_ms: int, notes: List[int], durations: List[int], instrument_id: str):
-    """Insert a music entry into the database"""
+    """Inserts a music entry."""
     cur = conn.cursor()
     cur.execute("""
-        INSERT OR REPLACE INTO music (timestamp_ms, notes, durations, instrument_id)
+        INSERT INTO music (timestamp_ms, notes, durations, instrument_id)
         VALUES (?, ?, ?, ?)
     """, (timestamp_ms, json.dumps(notes), json.dumps(durations), instrument_id))
     conn.commit()
 
 def insert_speech(conn: sqlite3.Connection, sentence: str, start_time_ms: int, voice_id: str):
-    """Insert a speech entry into the database"""
+    """Inserts a speech entry."""
     cur = conn.cursor()
     cur.execute("""
         INSERT INTO speech (sentence, start_time_ms, voice_id)
@@ -266,14 +276,11 @@ def insert_speech(conn: sqlite3.Connection, sentence: str, start_time_ms: int, v
 # -----------------------
 # Legacy text parsing helpers
 # -----------------------
+
 def extract_table_block(text: str, table_marker: str) -> str:
     """
     Return the block of text after the first occurrence of table_marker
     (e.g. "TABLE1") up to the next TABLE[1-3] marker or EOF.
-    Examples:
-      extract_table_block(raw_text, "TABLE1")
-    Will return the text immediately after "TABLE1" (case-insensitive)
-    until the next "TABLE1/2/3" header or end of file.
     """
     if not text or not table_marker:
         return ""
@@ -283,7 +290,7 @@ def extract_table_block(text: str, table_marker: str) -> str:
         return ""
     start = m.end()
     # Find next TABLE1|TABLE2|TABLE3 header after the marker
-    nxt = re.search(r'\bTABLE[123]\b', text[start:], re.IGNORECASE)
+    nxt = re.search(r'\bTABLE[123]\b|\bMUSIC\b|\bSPEECH\b', text[start:], re.IGNORECASE)
     if nxt:
         end = start + nxt.start()
     else:
@@ -298,7 +305,7 @@ def parse_legacy_rows(block: str) -> List[List[str]]:
     lines = [ln.strip() for ln in block.splitlines() if ln.strip()!='']
     rows = []
     for ln in lines:
-        # find all {...} groups; if none, try split by 'ROW' or by ';;'
+        # find all {...} groups; if none, try split by '|' or ';;'
         groups = re.findall(r'\{([^}]*)\}', ln)
         if not groups:
             # fallback: split by '|' or ';;'
@@ -312,33 +319,17 @@ def parse_legacy_rows(block: str) -> List[List[str]]:
 # -----------------------
 # Audio parsing helpers
 # -----------------------
+
 def parse_music_data_from_json(data: dict) -> List[dict]:
-    """
-    Parse music data from a JSON object
-    
-    Expected format:
-    {
-        "music": [
-            {
-                "time_ms": 100,
-                "notes": [60, 64, 67],
-                "durations": [500, 500, 500],
-                "instrument": "piano"
-            },
-            ...
-        ]
-    }
-    """
+    """Parses music data from a JSON object."""
     music_entries = []
     music_list = data.get("music", []) or []
-    
     for entry in music_list:
         try:
             time_ms = int(entry.get("time_ms", 0))
             notes = [int(n) for n in entry.get("notes", []) if isinstance(n, (int, float))]
             durations = [int(d) for d in entry.get("durations", []) if isinstance(d, (int, float))]
             instrument = str(entry.get("instrument", "piano"))
-            
             if notes and durations and len(notes) == len(durations):
                 music_entries.append({
                     "time_ms": time_ms,
@@ -348,34 +339,17 @@ def parse_music_data_from_json(data: dict) -> List[dict]:
                 })
         except (TypeError, ValueError):
             continue
-            
     return music_entries
 
 def parse_speech_data_from_json(data: dict) -> List[dict]:
-    """
-    Parse speech data from a JSON object
-    
-    Expected format:
-    {
-        "speech": [
-            {
-                "sentence": "Hello, this is a test.",
-                "start_time_ms": 2000,
-                "voice": "female_english"
-            },
-            ...
-        ]
-    }
-    """
+    """Parses speech data from a JSON object."""
     speech_entries = []
     speech_list = data.get("speech", []) or []
-    
     for entry in speech_list:
         try:
             sentence = str(entry.get("sentence", ""))
             start_time_ms = int(entry.get("start_time_ms", 0))
             voice = str(entry.get("voice", "default"))
-            
             if sentence.strip():
                 speech_entries.append({
                     "sentence": sentence,
@@ -384,44 +358,31 @@ def parse_speech_data_from_json(data: dict) -> List[dict]:
                 })
         except (TypeError, ValueError):
             continue
-            
     return speech_entries
 
 def parse_music_block_legacy(text: str) -> List[dict]:
-    """
-    Parse a legacy music block
-    
-    Format: time:{notes};{durations};instrument
-    Example: 100:{60;64;67};{500;500;500};piano
-    """
+    """Parses a legacy music block."""
     music_entries = []
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    
     for line in lines:
         parts = line.split(":", 1)
         if len(parts) < 2:
             continue
-            
         try:
             time_ms = int(parts[0].strip())
             data = parts[1].strip()
-            
             # Split the data part
             data_parts = data.split(";", 3)
             if len(data_parts) < 3:
                 continue
-                
             # Parse notes
             notes_str = data_parts[0].strip("{}")
             notes = [int(n.strip()) for n in notes_str.split(";") if n.strip().isdigit()]
-            
             # Parse durations
             durations_str = data_parts[1].strip("{}")
             durations = [int(d.strip()) for d in durations_str.split(";") if d.strip().isdigit()]
-            
             # Get instrument
             instrument = data_parts[2].strip()
-            
             # Add to entries
             if notes and durations and len(notes) == len(durations):
                 music_entries.append({
@@ -430,49 +391,38 @@ def parse_music_block_legacy(text: str) -> List[dict]:
                     "durations": durations,
                     "instrument": instrument
                 })
-                
         except (ValueError, IndexError):
             continue
-            
     return music_entries
 
 def parse_speech_block_legacy(text: str) -> List[dict]:
-    """
-    Parse a legacy speech block
-    
-    Format: time:sentence:voice
-    Example: 2000:Hello, this is a test.:female_english
-    """
+    """Parses a legacy speech block."""
     speech_entries = []
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    
     for line in lines:
         parts = line.split(":", 2)
         if len(parts) < 3:
             continue
-            
         try:
             time_ms = int(parts[0].strip())
             sentence = parts[1].strip()
             voice = parts[2].strip()
-            
             if sentence:
                 speech_entries.append({
                     "sentence": sentence,
                     "start_time_ms": time_ms,
                     "voice": voice
                 })
-                
         except (ValueError, IndexError):
             continue
-            
     return speech_entries
 
 # -----------------------
 # Main parser & writer
 # -----------------------
+
 def process_json_input(conn: sqlite3.Connection, data: dict):
-    # Expected keys: points, lines, shapes, music, speech
+    """Processes JSON input data and inserts into the database."""
     inserted = {"points":0,"lines":0,"shapes":0, "music":0, "speech":0}
     
     # POINTS
@@ -489,7 +439,7 @@ def process_json_input(conn: sqlite3.Connection, data: dict):
         movements_json = normalize_movements_json(p.get("movements", p.get("changes", [])))
         insert_point(conn, coords, uuid_str, connected_json, movements_json)
         inserted["points"] += 1
-    
+
     # LINES
     lns = data.get("lines", []) or []
     for l in lns:
@@ -504,8 +454,8 @@ def process_json_input(conn: sqlite3.Connection, data: dict):
         except Exception as e:
             print("Skipping line due to error:", e, l)
             continue
-    
-    # SHAPES (FIXED: Added uuid handling)
+
+    # SHAPES
     shs = data.get("shapes", []) or []
     for s in shs:
         try:
@@ -519,7 +469,7 @@ def process_json_input(conn: sqlite3.Connection, data: dict):
         except Exception as e:
             print("Skipping shape due to error:", e, s)
             continue
-    
+
     # MUSIC
     music_entries = parse_music_data_from_json(data)
     for entry in music_entries:
@@ -529,7 +479,7 @@ def process_json_input(conn: sqlite3.Connection, data: dict):
                     entry["durations"], 
                     entry["instrument"])
         inserted["music"] += 1
-    
+
     # SPEECH
     speech_entries = parse_speech_data_from_json(data)
     for entry in speech_entries:
@@ -542,17 +492,17 @@ def process_json_input(conn: sqlite3.Connection, data: dict):
     return inserted
 
 def process_legacy_text(conn: sqlite3.Connection, raw_text: str):
+    """Processes legacy text input data and inserts into the database."""
     inserted = {"points":0,"lines":0,"shapes":0, "music":0, "speech":0}
     
     # Extract blocks
     tbl1 = extract_table_block(raw_text, "TABLE1")
     tbl2 = extract_table_block(raw_text, "TABLE2")
     tbl3 = extract_table_block(raw_text, "TABLE3")
-    
     # Extract audio blocks
     music_block = extract_table_block(raw_text, "MUSIC")
     speech_block = extract_table_block(raw_text, "SPEECH")
-    
+
     # TABLE1 -> points
     rows1 = parse_legacy_rows(tbl1)
     for fields in rows1:
@@ -571,7 +521,7 @@ def process_legacy_text(conn: sqlite3.Connection, raw_text: str):
         except Exception as e:
             print("Skipping legacy point row - error:", e, fields)
             continue
-    
+
     # TABLE2 -> lines
     rows2 = parse_legacy_rows(tbl2)
     for fields in rows2:
@@ -592,8 +542,8 @@ def process_legacy_text(conn: sqlite3.Connection, raw_text: str):
         except Exception as e:
             print("Skipping legacy line row - error:", e, fields)
             continue
-    
-    # TABLE3 -> shapes (FIXED: Added uuid handling)
+
+    # TABLE3 -> shapes
     rows3 = parse_legacy_rows(tbl3)
     for fields in rows3:
         # expected: uuid, point_uuids, line_uuids, color, movements
@@ -613,7 +563,7 @@ def process_legacy_text(conn: sqlite3.Connection, raw_text: str):
         except Exception as e:
             print("Skipping legacy shape row - error:", e, fields)
             continue
-    
+
     # MUSIC
     if music_block:
         music_entries = parse_music_block_legacy(music_block)
@@ -624,7 +574,7 @@ def process_legacy_text(conn: sqlite3.Connection, raw_text: str):
                         entry["durations"],
                         entry["instrument"])
             inserted["music"] += 1
-    
+
     # SPEECH
     if speech_block:
         speech_entries = parse_speech_block_legacy(speech_block)
@@ -640,7 +590,9 @@ def process_legacy_text(conn: sqlite3.Connection, raw_text: str):
 # -----------------------
 # CLI & main
 # -----------------------
+
 def clear_tables(conn: sqlite3.Connection):
+    """Clears all data from the database tables."""
     c = conn.cursor()
     c.execute("DELETE FROM points;")
     c.execute("DELETE FROM lines;")
@@ -650,6 +602,7 @@ def clear_tables(conn: sqlite3.Connection):
     conn.commit()
 
 def main():
+    """Main function for the command-line interface."""
     ap = argparse.ArgumentParser(description="ZeroFiller - fill graphics.db from LLM output (JSON or legacy text).")
     ap.add_argument("input", nargs="?", help="Input file (JSON or text). Use --stdin to read from stdin.")
     ap.add_argument("--stdin", action="store_true", help="Read input from STDIN")
@@ -662,7 +615,7 @@ def main():
         print("DB not found:", args.db)
         print("Run ZeroInit.py to create the DB first.")
         sys.exit(1)
-    
+        
     if args.stdin:
         raw = sys.stdin.read()
     elif args.input:
@@ -672,24 +625,22 @@ def main():
         print("Provide an input file or use --stdin")
         ap.print_help()
         return
-    
+
     # Try parse JSON first
     j = try_load_json(raw)
     conn = sqlite3.connect(args.db)
-    
     if args.clear:
         clear_tables(conn)
         print("Cleared existing tables.")
-    
+        
     inserted = {"points":0,"lines":0,"shapes":0, "music":0, "speech":0}
-    
     if j is not None and isinstance(j, dict):
         print("Detected JSON input. Processing...")
         inserted = process_json_input(conn, j)
     else:
         print("Treating input as legacy text format. Parsing...")
         inserted = process_legacy_text(conn, raw)
-    
+        
     conn.close()
     print("Insertion summary:", inserted)
     print("Done.")

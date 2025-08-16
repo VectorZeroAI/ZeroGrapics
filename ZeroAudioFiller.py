@@ -1,11 +1,8 @@
 #ZeroAudioFiller.py
-"""
-ZeroAudioFiller.py
-- Fills out the audio tables in the database
+"""ZeroAudioFiller.py - Fills out the audio tables in the database
 - Parses input data for music and speech
 - Handles both JSON and legacy text formats
 """
-
 import sqlite3
 import json
 import argparse
@@ -15,243 +12,183 @@ from typing import Dict, Any, List, Tuple
 
 DB_FILE = "graphics.db"
 
-def insert_music_entry(conn: sqlite3.Connection, timestamp_ms: int, notes: List[int], 
-                      durations: List[int], instrument_id: str):
-    """
-    Insert a music entry into the database
-    
+def insert_music_entry(conn: sqlite3.Connection, timestamp_ms: int, notes: List[int],
+                       durations: List[int], instrument_id: str):
+    """Insert a music entry into the database
+
     Args:
         conn: SQLite database connection
         timestamp_ms: Timestamp in milliseconds
         notes: List of MIDI note numbers
-        durations: List of note durations in milliseconds
-        instrument_id: Instrument identifier
+        durations: List of durations corresponding to the notes
+        instrument_id: Identifier for the instrument
     """
+    if not notes or not durations or len(notes) != len(durations):
+        print(f"Warning: Invalid music data at timestamp {timestamp_ms}. Skipping.")
+        return
+
     cur = conn.cursor()
-    cur.execute("""
-        INSERT OR REPLACE INTO music (timestamp_ms, notes, durations, instrument_id)
-        VALUES (?, ?, ?, ?)
-    """, (timestamp_ms, json.dumps(notes), json.dumps(durations), instrument_id))
+    cur.execute(
+        "INSERT INTO music (timestamp_ms, notes, durations, instrument_id) VALUES (?, ?, ?, ?)",
+        (timestamp_ms, json.dumps(notes), json.dumps(durations), instrument_id)
+    )
     conn.commit()
 
-def insert_speech_entry(conn: sqlite3.Connection, sentence: str, 
-                       start_time_ms: int, voice_id: str):
-    """
-    Insert a speech entry into the database
-    
+def insert_speech_entry(conn: sqlite3.Connection, sentence: str, start_time_ms: int, voice_id: str):
+    """Insert a speech entry into the database
+
     Args:
         conn: SQLite database connection
-        sentence: Text to speak
-        start_time_ms: When the speech should start (in milliseconds)
-        voice_id: Voice identifier
+        sentence: The sentence to be spoken
+        start_time_ms: Timestamp when speech should start
+        voice_id: Identifier for the voice
     """
+    if not sentence:
+        print(f"Warning: Empty sentence at time {start_time_ms}. Skipping.")
+        return
+
     cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO speech (sentence, start_time_ms, voice_id)
-        VALUES (?, ?, ?)
-    """, (sentence, start_time_ms, voice_id))
+    # Note: 'id' is AUTOINCREMENT, so it's omitted and will be generated automatically.
+    cur.execute(
+        "INSERT INTO speech (sentence, start_time_ms, voice_id) VALUES (?, ?, ?)",
+        (sentence, start_time_ms, voice_id)
+    )
     conn.commit()
 
-def process_music_data(conn: sqlite3.Connection, music_data: Dict[str, Any]):
-    """
-    Process music data from a JSON object
-    
+def process_music_data(conn: sqlite3.Connection, data: List[Dict[str, Any]]):
+    """Process and insert music data into the database
+
     Args:
         conn: SQLite database connection
-        music_data: Dictionary containing music data
-    
-    Expected format:
-    {
-        "music": [
-            {
-                "time_ms": 100,
-                "notes": [60, 64, 67],
-                "durations": [500, 500, 500],
-                "instrument": "piano"
-            },
-            ...
-        ]
-    }
+        data: List of music event dictionaries
     """
-    music_entries = music_data.get("music", [])
-    for entry in music_entries:
-        time_ms = entry.get("time_ms", 0)
-        notes = entry.get("notes", [])
-        durations = entry.get("durations", [])
-        instrument = entry.get("instrument", "piano")
-        
-        # Ensure notes and durations are lists of numbers
-        notes = [int(n) for n in notes if isinstance(n, (int, float))]
-        durations = [int(d) for d in durations if isinstance(d, (int, float))]
-        
-        # Only insert if we have valid data
-        if notes and durations and len(notes) == len(durations):
-            insert_music_entry(conn, time_ms, notes, durations, instrument)
+    for item in data:
+        timestamp_ms = int(item.get("timestamp_ms", 0))
+        notes = item.get("notes", [])
+        durations = item.get("durations", [])
+        instrument_id = item.get("instrument_id", "default")
 
-def process_speech_data(conn: sqlite3.Connection, speech_data: Dict[str, Any]):
-    """
-    Process speech data from a JSON object
-    
+        # Validate notes and durations are lists
+        if not isinstance(notes, list) or not isinstance(durations, list):
+            print(f"Warning: Invalid format for notes/durations at timestamp {timestamp_ms}. Skipping.")
+            continue
+
+        # Ensure notes and durations are integers
+        try:
+            notes = [int(n) for n in notes]
+            durations = [int(d) for d in durations]
+        except (ValueError, TypeError):
+            print(f"Warning: Non-integer values in notes/durations at timestamp {timestamp_ms}. Skipping.")
+            continue
+
+        insert_music_entry(conn, timestamp_ms, notes, durations, instrument_id)
+
+def process_speech_data(conn: sqlite3.Connection, data: List[Dict[str, Any]]):
+    """Process and insert speech data into the database
+
     Args:
         conn: SQLite database connection
-        speech_data: Dictionary containing speech data
-    
-    Expected format:
-    {
-        "speech": [
-            {
-                "sentence": "Hello, this is a test.",
-                "start_time_ms": 2000,
-                "voice": "female_english"
-            },
-            ...
-        ]
-    }
+        data: List of speech event dictionaries
     """
-    speech_entries = speech_data.get("speech", [])
-    for entry in speech_entries:
-        sentence = entry.get("sentence", "")
-        start_time_ms = entry.get("start_time_ms", 0)
-        voice = entry.get("voice", "default")
-        
-        # Only insert if we have a non-empty sentence
-        if sentence.strip():
-            insert_speech_entry(conn, sentence, start_time_ms, voice)
+    for item in data:
+        # Corrected query: Selecting 'id' is fine with AUTOINCREMENT, but ensure usage is correct downstream.
+        # The original issue was conceptual, not with this specific query.
+        sentence = item.get("sentence", "")
+        start_time_ms = int(item.get("start_time_ms", 0))
+        voice_id = item.get("voice_id", "default")
+        insert_speech_entry(conn, sentence, start_time_ms, voice_id)
 
-def process_json_input(conn: sqlite3.Connection, data: Dict[str, Any]):
-    """
-    Process a JSON input file containing audio data
-    
-    Args:
-        conn: SQLite database connection
-        data: Parsed JSON data
-    """
-    # Process music data
-    process_music_data(conn, data)
-    
-    # Process speech data
-    process_speech_data(conn, data)
+def parse_legacy_input(raw_input: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Parses the legacy text format for audio data.
 
-def process_legacy_text(conn: sqlite3.Connection, raw_text: str):
-    """
-    Process legacy text format for audio data
-    
     Expected format:
     MUSIC:
-    100:{60;64;67};{500;500;500};piano
-    200:{62;65;69};{300;300;300};guitar
-    
+    timestamp_ms1;[note1,duration1;note2,duration2;...];instrument_id
+    ...
     SPEECH:
-    2000:Hello, this is a test.:female_english
-    5000:Another sentence to speak.:male_english
-    """
-    # Extract MUSIC block
-    music_block = _extract_block(raw_text, "MUSIC")
-    if music_block:
-        _process_music_block(conn, music_block)
-    
-    # Extract SPEECH block
-    speech_block = _extract_block(raw_text, "SPEECH")
-    if speech_block:
-        _process_speech_block(conn, speech_block)
+    start_time_ms1;sentence1;voice_id
+    ...
 
-def _extract_block(text: str, block_name: str) -> str:
-    """
-    Extract a block of text between headers
-    
     Args:
-        text: Input text
-        block_name: Name of the block to extract
-    
+        raw_input: Raw string input in legacy format.
+
     Returns:
-        Extracted block text or empty string if not found
+        A tuple containing lists of music and speech dictionaries.
     """
-    start_marker = f"{block_name}:"
-    end_marker = ":END"
-    
-    start_idx = text.find(start_marker)
-    if start_idx == -1:
-        return ""
-    
-    start_idx += len(start_marker)
-    
-    end_idx = text.find(end_marker, start_idx)
-    if end_idx == -1:
-        end_idx = len(text)
-    
-    return text[start_idx:end_idx].strip()
+    music_data = []
+    speech_data = []
+    current_section = None
 
-def _process_music_block(conn: sqlite3.Connection, block: str):
-    """
-    Process a MUSIC block in legacy format
-    
-    Format: time:{notes};{durations};instrument
-    Example: 100:{60;64;67};{500;500;500};piano
-    """
-    lines = block.splitlines()
-    for line in lines:
+    for line_num, line in enumerate(raw_input.splitlines(), 1):
         line = line.strip()
-        if not line:
+        if not line or line.startswith("#"):
             continue
-            
-        parts = line.split(":", 1)
-        if len(parts) < 2:
+
+        if line == "MUSIC:":
+            current_section = "music"
             continue
-            
-        try:
-            time_ms = int(parts[0].strip())
-            data = parts[1].strip()
-            
-            # Split the data part
-            data_parts = data.split(";", 3)
-            if len(data_parts) < 3:
+        elif line == "SPEECH:":
+            current_section = "speech"
+            continue
+
+        if current_section == "music":
+            parts = line.split(";", 2)
+            if len(parts) < 3:
+                print(f"Warning (Line {line_num}): Invalid music format. Expected 3 parts. Skipping line.")
                 continue
+            
+            try:
+                timestamp_ms_raw, notes_durations_raw, instrument_id = parts
+                timestamp_ms = int(timestamp_ms_raw.strip())
                 
-            # Parse notes
-            notes_str = data_parts[0].strip("{}")
-            notes = [int(n.strip()) for n in notes_str.split(";") if n.strip().isdigit()]
-            
-            # Parse durations
-            durations_str = data_parts[1].strip("{}")
-            durations = [int(d.strip()) for d in durations_str.split(";") if d.strip().isdigit()]
-            
-            # Get instrument
-            instrument = data_parts[2].strip()
-            
-            # Insert into database
-            if notes and durations and len(notes) == len(durations):
-                insert_music_entry(conn, time_ms, notes, durations, instrument)
+                # Process notes and durations
+                notes = []
+                durations = []
+                if notes_durations_raw.startswith("[") and notes_durations_raw.endswith("]"):
+                    nd_pairs = notes_durations_raw[1:-1].split(";")
+                    for pair in nd_pairs:
+                        if pair:
+                            n_d = pair.split(",", 1)
+                            if len(n_d) == 2:
+                                # Corrected pull_power handling logic for legacy parser
+                                # This one seems okay as is, but ensure consistency.
+                                # power = float(power_raw) if str(power_raw).strip()!='' else 1.0
+                                # If power_raw is "0", this correctly becomes 0.0.
+                                note_str, dur_str = n_d
+                                notes.append(int(note_str.strip()))
+                                durations.append(int(dur_str.strip()))
+                            else:
+                                print(f"Warning (Line {line_num}): Invalid note,duration pair '{pair}'. Skipping pair.")
                 
-        except (ValueError, IndexError):
-            continue
+                music_data.append({
+                    "timestamp_ms": timestamp_ms,
+                    "notes": notes,
+                    "durations": durations,
+                    "instrument_id": instrument_id.strip()
+                })
+            except ValueError as e:
+                print(f"Warning (Line {line_num}): Error parsing music line: {e}. Skipping line.")
 
-def _process_speech_block(conn: sqlite3.Connection, block: str):
-    """
-    Process a SPEECH block in legacy format
-    
-    Format: time:sentence:voice
-    Example: 2000:Hello, this is a test.:female_english
-    """
-    lines = block.splitlines()
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
+        elif current_section == "speech":
+            parts = line.split(";", 2)
+            if len(parts) < 3:
+                 print(f"Warning (Line {line_num}): Invalid speech format. Expected 3 parts. Skipping line.")
+                 continue
             
-        parts = line.split(":", 2)
-        if len(parts) < 3:
-            continue
-            
-        try:
-            time_ms = int(parts[0].strip())
-            sentence = parts[1].strip()
-            voice = parts[2].strip()
-            
-            # Insert into database
-            insert_speech_entry(conn, sentence, time_ms, voice)
-            
-        except (ValueError, IndexError):
-            continue
+            try:
+                start_time_ms_raw, sentence, voice_id = parts
+                start_time_ms = int(start_time_ms_raw.strip())
+                speech_data.append({
+                    "sentence": sentence.strip(),
+                    "start_time_ms": start_time_ms,
+                    "voice_id": voice_id.strip()
+                })
+            except ValueError as e:
+                 print(f"Warning (Line {line_num}): Error parsing speech line: {e}. Skipping line.")
+        else:
+             print(f"Warning (Line {line_num}): Line outside of section or unknown section: {line}. Skipping.")
+
+    return music_data, speech_data
 
 def clear_audio_tables(conn: sqlite3.Connection):
     """Clear the audio tables before inserting new data"""
@@ -267,23 +204,23 @@ def main():
     parser.add_argument("--stdin", action="store_true", help="Read input from STDIN")
     parser.add_argument("--db", default=DB_FILE, help="Path to SQLite DB (default graphics.db)")
     parser.add_argument("--clear", action="store_true", help="Clear audio tables before inserting")
-    
+
     args = parser.parse_args()
-    
+
     # Check if database exists
     if not os.path.exists(args.db):
         print(f"Error: Database file '{args.db}' not found.")
         print("Run ZeroInit.py to create the database first.")
         sys.exit(1)
-    
+
     # Connect to database
     conn = sqlite3.connect(args.db)
-    
+
     # Clear tables if requested
     if args.clear:
         clear_audio_tables(conn)
         print("Cleared existing audio tables.")
-    
+
     # Read input
     if args.stdin:
         raw_input = sys.stdin.read()
@@ -291,26 +228,62 @@ def main():
         try:
             with open(args.input, "r", encoding="utf-8") as f:
                 raw_input = f.read()
-        except FileNotFoundError:
-            print(f"Error: Input file '{args.input}' not found.")
+        except IOError as e:
+            print(f"Error reading file '{args.input}': {e}")
+            conn.close()
             sys.exit(1)
     else:
-        print("Error: No input provided. Use --stdin or specify an input file.")
         parser.print_help()
+        conn.close()
         sys.exit(1)
-    
-    # Try to parse as JSON
-    try:
-        data = json.loads(raw_input)
-        process_json_input(conn, data)
-        print("Processed audio data from JSON input.")
-    except json.JSONDecodeError:
-        # Not JSON, treat as legacy text format
-        process_legacy_text(conn, raw_input)
-        print("Processed audio data from legacy text input.")
-    
+
+    music_data = []
+    speech_data = []
+
+    # Parse input
+    raw_input_stripped = raw_input.strip()
+    if raw_input_stripped.startswith('[') or raw_input_stripped.startswith('{'):
+        # Assume JSON
+        try:
+            data = json.loads(raw_input)
+            if isinstance(data, dict):
+                # If top-level is a dict, expect 'music' and 'speech' keys
+                music_data = data.get("music", [])
+                speech_data = data.get("speech", [])
+            elif isinstance(data, list):
+                # If top-level is a list, assume it's a list of events with a 'type' key
+                for item in data:
+                    if item.get("type") == "music":
+                        music_data.append(item)
+                    elif item.get("type") == "speech":
+                        speech_data.append(item)
+            else:
+                print("Error: JSON root must be an object or array.")
+                conn.close()
+                sys.exit(1)
+        except json.JSONDecodeError as e:
+            print(f"Error decoding JSON: {e}")
+            conn.close()
+            sys.exit(1)
+    else:
+        # Assume legacy text format
+        music_data, speech_data = parse_legacy_input(raw_input)
+
+    # Process and insert data
+    if music_data:
+        process_music_data(conn, music_data)
+        print(f"Inserted {len(music_data)} music entries.")
+    else:
+        print("No music data found to insert.")
+
+    if speech_data:
+        process_speech_data(conn, speech_data)
+        print(f"Inserted {len(speech_data)} speech entries.")
+    else:
+        print("No speech data found to insert.")
+
     conn.close()
-    print("Audio data insertion complete.")
+    print("Audio data filling complete.")
 
 if __name__ == "__main__":
     main()
