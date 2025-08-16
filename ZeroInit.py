@@ -3,116 +3,179 @@ import sqlite3
 import os
 import json
 import uuid
+
 DB_FILE = "graphics.db"
+
 def create_database(db_path=DB_FILE, overwrite=False):
     # Remove DB if overwriting
     if overwrite and os.path.exists(db_path):
         os.remove(db_path)
-        print(f"Existing database '{db_path}' removed.")
-    # Connect to DB
+        print(f"Overwriting existing database: {db_path}")
+
+    # Connect to DB (creates it if it doesn't exist)
     conn = sqlite3.connect(db_path)
-    c = conn.cursor()
-    # Enable foreign keys (future-proofing)
-    c.execute("PRAGMA foreign_keys = ON;")
-    # ---------------------------
-    # Table 1: Points
-    # ---------------------------
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS points (
-        coordinates TEXT NOT NULL, -- "{x;y;z}"
-        uuid TEXT PRIMARY KEY, -- unique point identifier
-        connected_points TEXT, -- "{uuid1;uuid2;...}"
-        movements TEXT -- JSON string: "{(x;y;[a;b;c]);...}"
-    );
+    cur = conn.cursor()
+
+    # Create Table 1: points
+    # Schema: coordinates TEXT, uuid TEXT PRIMARY KEY, connected_points TEXT, movements TEXT
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS points (
+            coordinates TEXT NOT NULL,
+            uuid TEXT PRIMARY KEY,
+            connected_points TEXT,
+            movements TEXT
+        )
     """)
-    # ---------------------------
-    # Table 2: Lines
-    # ---------------------------
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS lines (
-        uuid TEXT PRIMARY KEY, -- unique line identifier
-        endpoints TEXT NOT NULL, -- "{point_uuid1;point_uuid2}"
-        pull_point TEXT NOT NULL, -- "{x;y;z}"
-        pull_power REAL NOT NULL, -- numeric value
-        movements TEXT -- JSON string: "{(x;y;[a;b;c;d]);...}"
-    );
+
+    # Create Table 2: lines
+    # Schema: uuid TEXT PRIMARY KEY, endpoints TEXT, pull_point TEXT, pull_power REAL, movements TEXT
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS lines (
+            uuid TEXT PRIMARY KEY,
+            endpoints TEXT NOT NULL,
+            pull_point TEXT,
+            pull_power REAL,
+            movements TEXT
+        )
     """)
-    # ---------------------------
-    # Table 3: Shapes (FIXED: Added uuid column)
-    # ---------------------------
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS shapes (
-        uuid TEXT PRIMARY KEY, -- unique shape identifier (FIXED: Added this column)
-        point_uuids TEXT NOT NULL, -- "{point_uuid1;point_uuid2;...}"
-        line_uuids TEXT NOT NULL, -- "{line_uuid1;line_uuid2;...}"
-        color TEXT NOT NULL, -- "{r;g;b}"
-        movements TEXT -- JSON string: "{(x;y;[a;b;c]);...}"
-    );
+
+    # Create Table 3: shapes
+    # Schema: uuid TEXT PRIMARY KEY, point_uuids TEXT, line_uuids TEXT, color TEXT, movements TEXT
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS shapes (
+            uuid TEXT PRIMARY KEY,
+            point_uuids TEXT,
+            line_uuids TEXT,
+            color TEXT,
+            movements TEXT
+        )
     """)
-    # ---------------------------
-    # Table 4: Music (New Audio Table) - FIXED: Primary Key Design
-    # ---------------------------
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS music (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,  -- Use autoincrement ID instead of timestamp_ms as PRIMARY KEY
-        timestamp_ms INTEGER NOT NULL,         -- Timestamp is no longer the primary key
-        notes TEXT NOT NULL, -- JSON array of note values that should start at this moment
-        durations TEXT NOT NULL, -- JSON array of durations corresponding to each note
-        instrument_id TEXT NOT NULL -- instrument identifier (maps to config)
-    );
+
+    # Create Table 4: music (for audio support)
+    # Schema: id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp_ms INTEGER NOT NULL,
+    #         notes TEXT NOT NULL, durations TEXT NOT NULL, instrument_id TEXT NOT NULL
+    # Note: Storing lists as TEXT (JSON strings) is a simple approach.
+    #       A more normalized structure (e.g., a separate notes table) is often better for complex queries.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS music (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp_ms INTEGER NOT NULL,
+            notes TEXT NOT NULL,        -- JSON list of note frequencies (e.g., "[440, 523]")
+            durations TEXT NOT NULL,    -- JSON list of durations in ms (e.g., "[500, 250]")
+            instrument_id TEXT NOT NULL -- Identifier for the instrument sound to use
+        )
     """)
-    # Add index for timestamp queries - FIXED: Added index for timestamp
-    c.execute("CREATE INDEX IF NOT EXISTS idx_music_timestamp ON music(timestamp_ms);")
-    
-    # ---------------------------
-    # Table 5: Speech (New Audio Table)
-    # ---------------------------
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS speech (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, -- unique identifier for each speech entry
-        sentence TEXT NOT NULL, -- the actual sentence/text
-        start_time_ms INTEGER NOT NULL, -- when the speech should start (in milliseconds)
-        voice_id TEXT NOT NULL -- voice identifier (maps to config)
-    );
+
+    # Create Table 5: speech (for audio support)
+    # Schema: id INTEGER PRIMARY KEY AUTOINCREMENT, sentence TEXT NOT NULL,
+    #         start_time_ms INTEGER NOT NULL, voice_id TEXT NOT NULL
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS speech (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sentence TEXT NOT NULL,
+            start_time_ms INTEGER NOT NULL,
+            voice_id TEXT NOT NULL -- Identifier for the TTS voice to use
+        )
     """)
+
+    # Commit changes
     conn.commit()
     conn.close()
-    print(f"Database '{db_path}' created/verified with required tables including audio support with proper indexing.")
+    print(f"Database '{db_path}' created/initialized successfully.")
+
 def seed_example_data(db_path=DB_FILE):
     """Optional: Inserts one sample row per table for debugging."""
+    if not os.path.exists(db_path):
+        print(f"Database '{db_path}' not found. Run create_database first.")
+        return
+
     conn = sqlite3.connect(db_path)
-    c = conn.cursor()
-    # Example point
+    cur = conn.cursor()
+
+    # Sample UUIDs
     point_uuid = str(uuid.uuid4())
-    c.execute("""
-    INSERT INTO points (coordinates, uuid, connected_points, movements)
-    VALUES (?, ?, ?, ?)
-    """, ("{0;0;0}", point_uuid, "{}", "{}"))
-    # Example line
     line_uuid = str(uuid.uuid4())
-    c.execute("""
-    INSERT INTO lines (uuid, endpoints, pull_point, pull_power, movements)
-    VALUES (?, ?, ?, ?, ?)
-    """, (line_uuid, f"{{{point_uuid};{point_uuid}}}", "{0;0;0}", 1.0, "{}"))
-    # Example shape (FIXED: Added uuid parameter)
     shape_uuid = str(uuid.uuid4())
-    c.execute("""
-    INSERT INTO shapes (uuid, point_uuids, line_uuids, color, movements)
-    VALUES (?, ?, ?, ?, ?)
-    """, (shape_uuid, f"{{{point_uuid}}}", f"{{{line_uuid}}}", "{1;0;0}", "{}"))
-    # Example music entry (timestamp 100ms) - FIXED: Now using proper insertion without specifying id
-    c.execute("""
-    INSERT INTO music (timestamp_ms, notes, durations, instrument_id)
-    VALUES (?, ?, ?, ?)
-    """, (100, json.dumps([60, 64, 67]), json.dumps([500, 500, 500]), "piano"))
-    # Example speech entry
-    c.execute("""
-    INSERT INTO speech (sentence, start_time_ms, voice_id)
-    VALUES (?, ?, ?)
-    """, ("Hello, this is a test of the speech system.", 2000, "female_english"))
+
+    # Insert sample point
+    cur.execute("""
+        INSERT INTO points (coordinates, uuid, connected_points, movements)
+        VALUES (?, ?, ?, ?)
+    """, (
+        json.dumps([1.0, 2.0, 3.0]),  # coordinates
+        point_uuid,                   # uuid
+        json.dumps([]),              # connected_points
+        json.dumps({})               # movements
+    ))
+
+    # Insert sample line
+    cur.execute("""
+        INSERT INTO lines (uuid, endpoints, pull_point, pull_power, movements)
+        VALUES (?, ?, ?, ?, ?)
+    """, (
+        line_uuid,                            # uuid
+        json.dumps([[0, 0, 0], [1, 1, 1]]), # endpoints
+        json.dumps([0.5, 0.5, 0.5]),       # pull_point
+        0.5,                               # pull_power
+        json.dumps({})                     # movements
+    ))
+
+    # Insert sample shape
+    cur.execute("""
+        INSERT INTO shapes (uuid, point_uuids, line_uuids, color, movements)
+        VALUES (?, ?, ?, ?, ?)
+    """, (
+        shape_uuid,                         # uuid
+        json.dumps([point_uuid]),          # point_uuids
+        json.dumps([line_uuid]),           # line_uuids
+        json.dumps([1.0, 0.0, 0.0]),      # color (Red)
+        json.dumps({})                    # movements
+    ))
+
+    # Insert sample music entry (e.g., play A4 (440Hz) for 1000ms at timestamp 0ms using instrument 'sine')
+    cur.execute("""
+        INSERT INTO music (timestamp_ms, notes, durations, instrument_id)
+        VALUES (?, ?, ?, ?)
+    """, (
+        0,              # timestamp_ms
+        json.dumps([440]), # notes (A4)
+        json.dumps([1000]), # durations (1000ms)
+        'sine'          # instrument_id
+    ))
+
+     # Insert sample speech entry (e.g., say "Hello World" at 2000ms using voice 'default')
+    cur.execute("""
+        INSERT INTO speech (sentence, start_time_ms, voice_id)
+        VALUES (?, ?, ?)
+    """, (
+        "Hello World", # sentence
+        2000,          # start_time_ms
+        'default'      # voice_id
+    ))
+
+
     conn.commit()
     conn.close()
-    print("Example data inserted including audio examples.")
+    print("Example data seeded.")
+
+def main():
+    import argparse
+    import sys
+
+    ap = argparse.ArgumentParser(description="ZeroInit - Initialize the ZeroEngine database")
+    ap.add_argument("--db", default=DB_FILE, help="Path to SQLite DB (default graphics.db)")
+    ap.add_argument("--overwrite", action="store_true", help="Overwrite existing DB file")
+    ap.add_argument("--seed-example", action="store_true", help="Insert a tiny example after creating DB")
+    args = ap.parse_args()
+
+    if os.path.exists(args.db) and not args.overwrite:
+        print(f"DB '{args.db}' already exists. Use --overwrite to recreate.")
+        sys.exit(1)
+
+    create_database(args.db, overwrite=args.overwrite)
+
+    if args.seed_example:
+        seed_example_data(args.db)
+
 if __name__ == "__main__":
-    create_database(overwrite=False) # Change to True to reset DB
-    # seed_example_data() # Uncomment for debug data
+    main()
