@@ -1,283 +1,351 @@
-# ZeroEngine.py - improved rendering for ZeroGraphics with audio support
-import sys
-import ctypes
+# ZeroEngine.py - Kivy-based renderer for ZeroGraphics with audio support
+import kivy
+kivy.require('2.1.0')
+from kivy.app import App
+from kivy.uix.widget import Widget
+from kivy.graphics import Point, Line, Triangle, Color, InstructionGroup
+from kivy.clock import Clock
+from kivy.core.window import Window
+from kivy.config import Config as KivyConfig
 import math
+import sqlite3
+import json
 import time
-import pygame
-from pygame.locals import *
-import numpy as np
-from OpenGL.GL import *
-from OpenGL.GLU import *
+import sys
 from ZeroInterpreter import ZeroInterpreter
-from ZeroAudio import ZeroAudioPlayer # Import the audio player
+from ZeroAudio import ZeroAudioPlayer  # Import the audio player
 
-# default fallback config values
+# Default config values (used if Config module is not available)
 DEFAULT_CONFIG = {
     "CAMERA_POSITION": (0.0, 0.0, 6.0),
-    "POINT_COLOR": (1.0, 0.6, 0.2),
-    "LINE_COLOR": (0.9, 0.9, 0.9),
+    "POINT_COLOR": (1.0, 0.6, 0.2, 1.0),  # RGBA
+    "LINE_COLOR": (0.9, 0.9, 0.9, 1.0),    # RGBA
+    "SHAPE_FILL_COLOR": (0.5, 0.5, 1.0, 0.8),  # RGBA with transparency
+    "BACKGROUND_COLOR": (0.02, 0.02, 0.03, 1.0),  # RGBA
     "LINE_THICKNESS": 2.0,
-    "SHAPE_FILL_COLOR": (0.5, 0.5, 1.0),
-    "BACKGROUND_COLOR": (0.02, 0.02, 0.03),
+    "POINT_SIZE": 5.0,
+    "FPS": 60,
     "WINDOW_SIZE": (1280, 720)
 }
 
-# FIXED: Added proper Config import with error handling
+# Try to import custom Config, fall back to defaults if not available
 try:
-    from Config import Config
+    from Config import Config as CustomConfig
 except ImportError:
-    Config = None # Will fall back to DEFAULT_CONFIG
+    CustomConfig = None
 
 def cfg(name):
-    if Config is not None and hasattr(Config, name):
-        return getattr(Config, name)
+    """Get configuration value, trying CustomConfig first, then DEFAULT_CONFIG"""
+    if CustomConfig and hasattr(CustomConfig, name):
+        return getattr(CustomConfig, name)
     return DEFAULT_CONFIG.get(name, None)
 
-class ZeroEngine:
-    def __init__(self, db_path, width=None, height=None, target_fps=60): # Renamed sample_rate to target_fps for clarity
-        pygame.init()
-        self.width, self.height = width or cfg("WINDOW_SIZE")[0], height or cfg("WINDOW_SIZE")[1]
-        self.screen = pygame.display.set_mode((self.width, self.height), DOUBLEBUF | OPENGL | RESIZABLE)
-        pygame.display.set_caption("ZeroEngine")
-
-        # --- Fix: Initialize OpenGL settings ---
-        glEnable(GL_DEPTH_TEST) # Enable depth testing for 3D
-        glDepthFunc(GL_LESS)   # Closer objects obscure farther ones
-        glLineWidth(cfg("LINE_THICKNESS")) # Set line thickness
-
-        # --- Initialize VBOs ---
-        self.vbo_points = glGenBuffers(1)
-        self.vbo_lines = glGenBuffers(1)
-        self.vbo_triangles = glGenBuffers(1)
-
-        # --- Fix: Storage for line segment counts (Issue #1) ---
-        self.line_segment_counts = []
-        self.total_line_vertices = 0 # Track total vertices for line VBO offset
-
-        # --- Initialize Interpreter and Audio ---
+class Graphics:
+    """Core graphics engine that manages the animation timeline and rendering logic"""
+    
+    def __init__(self, db_path):
+        """Initialize the graphics engine with database path"""
+        self.db_path = db_path
+        self.pause = 1.0 / cfg("FPS")
+        self.model_2d = None
+        self.model_3d = None
+        self.frames = []
+        self.current_frame_index = 0
         self.interpreter = ZeroInterpreter(db_path)
         self.audio_player = ZeroAudioPlayer(db_path)
-
-        # --- Timing and Control ---
-        self.target_fps = target_fps
-        self.clock = pygame.time.Clock()
         self.current_tick = 0
-        self.running = True # Add a flag to control the main loop
-
-    def prepare_frame_gpu(self, frame_data):
-        """Uploads point, line, and triangle data to GPU VBOs."""
-        # --- Points ---
-        points = frame_data.get('points', [])
-        if points:
-            point_array = np.array([[p['coordinates'][0], p['coordinates'][1], p['coordinates'][2]] for p in points], dtype=np.float32)
-            glBindBuffer(GL_ARRAY_BUFFER, self.vbo_points)
-            glBufferData(GL_ARRAY_BUFFER, point_array.nbytes, point_array, GL_DYNAMIC_DRAW)
-            self.point_count = len(points)
-        else:
-            self.point_count = 0
-
-        # --- Lines (Fix: Handle segments correctly) ---
-        lines = frame_data.get('lines', [])
-        self.line_segment_counts = [] # Reset counts for this frame
-        line_vertices_list = []
-        for line in lines:
-            # --- Fix: Calculate Bezier curve points here (Option B) ---
-            p0 = np.array(line['endpoints'][0]['coordinates'], dtype=np.float32)
-            p1 = np.array(line['endpoints'][1]['coordinates'], dtype=np.float32)
-            pc = np.array(line['pull_point']['coordinates'], dtype=np.float32)
-            power = line.get('pull_power', 1.0)
-
-            # Calculate number of samples based on distance and power (basic adaptive sampling)
-            # Distance influences the number of points for smoother curves on longer lines.
-            distance = np.linalg.norm(p1 - p0)
-            num_samples = max(2, int(distance * 20 * power)) # Adjust multiplier (20) as needed
-
-            # Sample the quadratic Bezier curve
-            # B(t) = (1-t)^2 * P0 + 2*(1-t)*t * Pc + t^2 * P1
-            segment_points = []
-            for i in range(num_samples + 1): # +1 to include the end point
-                t = i / num_samples
-                bt = (1 - t) * (1 - t) * p0 + 2 * (1 - t) * t * pc + t * t * p1
-                segment_points.append(bt)
-
-            self.line_segment_counts.append(len(segment_points))
-            line_vertices_list.extend(segment_points)
-
-        if line_vertices_list:
-             # Create a single large array for all line vertices
-            line_array = np.array(line_vertices_list, dtype=np.float32)
-            glBindBuffer(GL_ARRAY_BUFFER, self.vbo_lines)
-            glBufferData(GL_ARRAY_BUFFER, line_array.nbytes, line_array, GL_DYNAMIC_DRAW)
-            self.total_line_vertices = len(line_vertices_list) # Total vertices uploaded
-        else:
-            self.total_line_vertices = 0
-
-        # --- Shapes (Triangles) ---
-        shapes = frame_data.get('shapes', [])
-        triangle_vertices = []
-        for shape in shapes:
-            # Basic triangulation: Fan triangulation assuming points form a convex polygon
-            point_uuids = shape.get('point_uuids', [])
-            if len(point_uuids) < 3:
-                continue
-
-            # Find coordinates for points in this shape
-            shape_points = [p for p in points if p['uuid'] in point_uuids]
-            if len(shape_points) < 3:
-                 continue # Not enough points fetched for this shape
-
-            coords = np.array([p['coordinates'] for p in shape_points], dtype=np.float32)
-
-            # Fan triangulation: Pick first point as center, connect to consecutive pairs
-            center = coords[0]
-            for i in range(1, len(coords) - 1):
-                triangle_vertices.extend([center, coords[i], coords[i+1]])
-
-        if triangle_vertices:
-            triangle_array = np.array(triangle_vertices, dtype=np.float32)
-            glBindBuffer(GL_ARRAY_BUFFER, self.vbo_triangles)
-            glBufferData(GL_ARRAY_BUFFER, triangle_array.nbytes, triangle_array, GL_DYNAMIC_DRAW)
-            self.triangle_count = len(triangle_vertices) # Number of vertices (multiples of 3)
-        else:
-            self.triangle_count = 0
-
-    def render_frame(self, frame_data):
-        """Renders the current frame using OpenGL."""
-        # Clear screen
-        glClearColor(*cfg("BACKGROUND_COLOR"), 1.0)
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-
-        # Set up projection and view (Simple setup)
-        glMatrixMode(GL_PROJECTION)
-        glLoadIdentity()
-        aspect_ratio = self.width / self.height if self.height != 0 else 1.0
-        gluPerspective(45, aspect_ratio, 0.1, 100.0)
-        glMatrixMode(GL_MODELVIEW)
-        glLoadIdentity()
+        self.widget = None  # Will be set by the Kivy app
+    
+    def calculate_total_frames(self, fps: int):
+        """
+        Calculate the amount of frames the animation should have,
+        according to FPS and the maximal ms defined by the DB.
+        Store results in self.frames.
+        """
+        # Query the DB for the maximum timestamp across all elements
+        max_time = 0
+        
+        # Check points for movements
+        for uuid, point in self.interpreter.points.items():
+            if point["movements"]:
+                last_movement = point["movements"][-1]
+                end_time = last_movement[0] + last_movement[1]
+                max_time = max(max_time, end_time)
+        
+        # Check lines for movements
+        for uuid, line in self.interpreter.lines.items():
+            if line["movements"]:
+                last_movement = line["movements"][-1]
+                end_time = last_movement[0] + last_movement[1]
+                max_time = max(max_time, end_time)
+        
+        # Check shapes for movements
+        for uuid, shape in self.interpreter.shapes.items():
+            if shape["movements"]:
+                last_movement = shape["movements"][-1]
+                end_time = last_movement[0] + last_movement[1]
+                max_time = max(max_time, end_time)
+        
+        # Check music events
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+        
+        # Check music
+        cur.execute("SELECT MAX(timestamp_ms) FROM music")
+        music_max = cur.fetchone()[0] or 0
+        max_time = max(max_time, music_max)
+        
+        # Check speech
+        cur.execute("SELECT MAX(start_time_ms) FROM speech")
+        speech_max = cur.fetchone()[0] or 0
+        max_time = max(max_time, speech_max)
+        
+        conn.close()
+        
+        # Add buffer (1 second)
+        max_time += 1000
+        
+        # Calculate frames
+        if max_time <= 0:
+            max_time = 10000  # Default to 10 seconds if no data
+        
+        # Create frame timestamps (in ms)
+        self.frames = [i for i in range(0, max_time, 1000 // fps)]
+    
+    def project_point(self, point_3d):
+        """Project 3D point to 2D using camera settings from Config"""
+        x, y, z = point_3d
+        
+        # Get camera position from Config
         camera_pos = cfg("CAMERA_POSITION")
-        gluLookAt(*camera_pos, 0, 0, 0, 0, 1, 0)
+        
+        # Translate point relative to camera
+        x -= camera_pos[0]
+        y -= camera_pos[1]
+        z -= camera_pos[2]
+        
+        # Simple perspective projection
+        fov = 45.0  # Field of view in degrees
+        aspect_ratio = Window.width / Window.height if Window.height != 0 else 1.0
+        
+        # Convert FOV to radians and calculate the projection scale
+        fov_rad = math.radians(fov)
+        scale = 1.0 / math.tan(fov_rad / 2.0)
+        
+        # Apply perspective projection
+        if z > 0.1:  # Avoid division by zero or negative z
+            x_proj = x * scale / z
+            y_proj = y * scale / z * aspect_ratio
+        else:
+            # For points too close to camera, use a minimum z
+            x_proj = x * scale / 0.1
+            y_proj = y * scale / 0.1 * aspect_ratio
+        
+        # Convert to screen coordinates
+        x_screen = x_proj * (Window.width / 3) + (Window.width / 2)
+        y_screen = y_proj * (Window.height / 3) + (Window.height / 2)
+        
+        return (x_screen, y_screen)
+    
+    def transform_3d_to_2d(self, model_3d):
+        """
+        Transform the 3D model into 2D coordinates that can be rendered.
+        """
+        model_2d = {
+            "points": {},
+            "lines": {},
+            "shapes": {}
+        }
+        
+        # Transform points
+        for uuid, point in model_3d["points"].items():
+            model_2d["points"][uuid] = self.project_point(point)
+        
+        # Transform lines
+        for uuid, line in model_3d["lines"].items():
+            # Transform the sampled points
+            sampled_points_2d = [self.project_point(p) for p in line["sampled_points"]]
+            model_2d["lines"][uuid] = {
+                "sampled_points": sampled_points_2d
+            }
+        
+        # Transform shapes
+        for uuid, shape in model_3d["shapes"].items():
+            # Get the 2D coordinates of the shape's points
+            points_2d = []
+            for point_uuid in shape["point_uuids"]:
+                if point_uuid in model_3d["points"]:
+                    points_2d.append(self.project_point(model_3d["points"][point_uuid]))
+            
+            model_2d["shapes"][uuid] = {
+                "points_2d": points_2d,
+                "color": shape["color"]
+            }
+        
+        return model_2d
+    
+    def render(self, model_2d):
+        """
+        Render the 2D model using Kivy graphics.
+        Check what the DB provides, and what it doesn't provide. Everything that the DB doesn't provide is config defined.
+        """
+        if not self.widget:
+            return
+        
+        # Clear previous drawings
+        self.widget.canvas.clear()
+        
+        # Set background color
+        with self.widget.canvas:
+            Color(*cfg("BACKGROUND_COLOR"))
+            Rectangle(pos=(0, 0), size=(Window.width, Window.height))
+        
+        with self.widget.canvas:
+            # Draw points
+            point_coords = []
+            for uuid, point in model_2d["points"].items():
+                x, y = point
+                point_coords.extend([x, y])
+            
+            if point_coords:
+                Color(*cfg("POINT_COLOR"))
+                Point(points=point_coords, pointsize=cfg("POINT_SIZE"))
+            
+            # Draw lines
+            for uuid, line in model_2d["lines"].items():
+                line_coords = []
+                for point in line["sampled_points"]:
+                    x, y = point
+                    line_coords.extend([x, y])
+                
+                if line_coords:
+                    Color(*cfg("LINE_COLOR"))
+                    Line(points=line_coords, width=cfg("LINE_THICKNESS"))
+            
+            # Draw shapes (filled)
+            for uuid, shape in model_2d["shapes"].items():
+                points = shape["points_2d"]
+                if len(points) >= 3:
+                    # Set shape color with transparency
+                    color = shape["color"]
+                    # Ensure we have 4 components (RGBA)
+                    if len(color) == 3:
+                        color = (color[0], color[1], color[2], 0.8)
+                    Color(*color)
+                    
+                    # Simple fan triangulation for convex polygons
+                    for i in range(1, len(points) - 1):
+                        Triangle(points=[
+                            points[0][0], points[0][1],
+                            points[i][0], points[i][1],
+                            points[i+1][0], points[i+1][1]
+                        ])
+    
+    def frame_full(self, ms: int):
+        """Process a single frame at the specified millisecond timestamp"""
+        self.model_3d = self.interpreter.read_full(ms)
+        self.model_2d = self.transform_3d_to_2d(self.model_3d)
+        self.render(self.model_2d)
+        # Update audio for this timestamp
+        self.audio_player.update(ms)
+        # Update debug info
+        self.current_tick = ms
+    
+    def play(self, dt=None):
+        """
+        Do not change this loop. This loop should act as the anchor that the program you create works with.
+        """
+        if not self.frames:
+            self.calculate_total_frames(cfg("FPS"))
+        
+        if self.current_frame_index >= len(self.frames):
+            self.current_frame_index = 0  # Loop back to start
+        
+        ms = self.frames[self.current_frame_index]
+        self.frame_full(ms)
+        
+        # Update debug label if available
+        if hasattr(self.widget, 'update_debug_info'):
+            self.widget.update_debug_info(ms, 
+                len(self.model_3d.get('points', [])),
+                len(self.model_3d.get('lines', [])),
+                len(self.model_3d.get('shapes', [])))
+        
+        self.current_frame_index += 1
 
-        # Enable vertex arrays
-        glEnableClientState(GL_VERTEX_ARRAY)
+class GraphicsWidget(Widget):
+    """Kivy widget that handles the actual rendering canvas"""
+    
+    def __init__(self, graphics, **kwargs):
+        super().__init__(**kwargs)
+        self.graphics = graphics
+        self.graphics.widget = self  # Give Graphics access to the widget's canvas
+        self.graphics.calculate_total_frames(cfg("FPS"))
+        
+        # Create debug label
+        from kivy.uix.label import Label
+        self.debug_label = Label(
+            text="Initializing...",
+            pos=(10, Window.height - 30),
+            size=(200, 30),
+            halign='left',
+            valign='middle',
+            font_size=14
+        )
+        self.add_widget(self.debug_label)
+    
+    def update_debug_info(self, ms, num_points, num_lines, num_shapes):
+        """Update the debug information label"""
+        self.debug_label.text = f"Time: {ms}ms | Points: {num_points} | Lines: {num_lines} | Shapes: {num_shapes}"
 
-        # --- Render Triangles (Shapes) ---
-        if self.triangle_count > 0:
-            glBindBuffer(GL_ARRAY_BUFFER, self.vbo_triangles)
-            glVertexPointer(3, GL_FLOAT, 0, None)
-            color = cfg("SHAPE_FILL_COLOR")
-            glColor3f(*color)
-            glDrawArrays(GL_TRIANGLES, 0, self.triangle_count) # Draw all triangles
+class ZeroEngineApp(App):
+    """Main Kivy application class for the ZeroEngine"""
+    
+    def __init__(self, db_path, **kwargs):
+        super().__init__(**kwargs)
+        self.db_path = db_path
+        self.graphics = None
+    
+    def build(self):
+        """Build the application UI"""
+        # Set window properties
+        window_size = cfg("WINDOW_SIZE")
+        Window.size = (window_size[0], window_size[1])
+        Window.clearcolor = cfg("BACKGROUND_COLOR")
+        
+        # Create the graphics engine and widget
+        self.graphics = Graphics(self.db_path)
+        return GraphicsWidget(self.graphics)
 
-        # --- Render Lines ---
-        if self.total_line_vertices > 0 and self.line_segment_counts:
-            glBindBuffer(GL_ARRAY_BUFFER, self.vbo_lines)
-            glVertexPointer(3, GL_FLOAT, 0, None)
-            color = cfg("LINE_COLOR")
-            glColor3f(*color)
-
-            # --- Fix: Draw each line segment correctly (Issue #1) ---
-            start_index = 0
-            for count in self.line_segment_counts:
-                if count >= 2: # Need at least 2 points for a line strip
-                    glDrawArrays(GL_LINE_STRIP, start_index, count)
-                start_index += count
-
-        # --- Render Points ---
-        if self.point_count > 0:
-            glBindBuffer(GL_ARRAY_BUFFER, self.vbo_points)
-            glVertexPointer(3, GL_FLOAT, 0, None)
-            color = cfg("POINT_COLOR")
-            glColor3f(*color)
-            glDrawArrays(GL_POINTS, 0, self.point_count)
-
-        # Disable vertex arrays
-        glDisableClientState(GL_VERTEX_ARRAY)
-        glBindBuffer(GL_ARRAY_BUFFER, 0) # Unbind VBO
-
-        # Update display
-        pygame.display.flip()
-
-    def handle_events(self):
-        """Handles Pygame events like window resize and quit."""
-        for event in pygame.event.get():
-            if event.type == QUIT:
-                return False
-            elif event.type == VIDEORESIZE:
-                self.width, self.height = event.size
-                pygame.display.set_mode((self.width, self.height), DOUBLEBUF | OPENGL | RESIZABLE)
-                glViewport(0, 0, self.width, self.height) # Update OpenGL viewport
-        return True
-
-    # FIXED: Corrected indentation for the run method docstring (Issue #5)
-    def run(self):
-        """Main rendering loop."""
-        # Initialize running flag
-        self.running = True
-        try:
-            while self.running:
-                # Update audio for the current time
-                self.audio_player.update(self.current_tick)
-
-                # Read frame from interpreter
-                frame = self.interpreter.read_full(self.current_tick)
-
-                # Convert and upload to GPU
-                self.prepare_frame_gpu(frame)
-
-                # Render
-                self.render_frame(frame)
-
-                # Debug caption
-                pygame.display.set_caption(f"ZeroEngine| Time: {self.current_tick}ms| Points: {len(frame.get('points',[]))}| Lines: {len(frame.get('lines',[]))}| Shapes: {len(frame.get('shapes',[]))}")
-
-                # Maintain frame rate
-                self.clock.tick(self.target_fps)
-
-                # Handle events and update running flag
-                self.running = self.handle_events()
-
-                # Advance time
-                self.current_tick += 1 # Increment time by 1ms per frame
-
-        except Exception as e:
-            print(f"An error occurred during the run loop: {e}")
-        finally:
-            # Cleanup
-            self.audio_player.cleanup()
-            self.cleanup() # Call cleanup for VBOs
-            pygame.quit()
-
-    # FIXED: Added cleanup method for VBOs (Issue #4)
-    def cleanup(self):
-        """Clean up OpenGL resources."""
-        try:
-            glDeleteBuffers(1, [self.vbo_points])
-            glDeleteBuffers(1, [self.vbo_lines])
-            glDeleteBuffers(1, [self.vbo_triangles])
-            print("VBOs deleted successfully.")
-        except Exception as e:
-            print(f"Error deleting VBOs: {e}")
-        # Note: Pygame.quit is called in run(), and audio cleanup in audio_player.cleanup()
-
-# --- Main execution block (moved outside the class) ---
 def main():
+    """Main entry point for the application"""
     import argparse
     import os
-    ap = argparse.ArgumentParser(description="ZeroEngine - Graphics and Audio Renderer")
+    
+    ap = argparse.ArgumentParser(description="ZeroEngine - Kivy-based Graphics and Audio Renderer")
     ap.add_argument("--db", default="graphics.db", help="Path to SQLite DB (default graphics.db)")
     ap.add_argument("--width", type=int, help="Window width")
     ap.add_argument("--height", type=int, help="Window height")
-    # Assuming target_fps might be configurable too, though not in original snippet
-    ap.add_argument("--fps", type=int, default=60, help="Target FPS (default 60)")
+    ap.add_argument("--fps", type=int, default=cfg("FPS"), help=f"Target FPS (default {cfg('FPS')})")
     args = ap.parse_args()
-
+    
     if not os.path.exists(args.db):
         print("DB not found:", args.db)
         print("Run ZeroInit.py to create the DB first.")
         sys.exit(1)
-
-    engine = ZeroEngine(args.db, args.width, args.height, target_fps=args.fps)
-    engine.run()
+    
+    # Set window size if provided
+    if args.width and args.height:
+        KivyConfig.set('graphics', 'width', str(args.width))
+        KivyConfig.set('graphics', 'height', str(args.height))
+    
+    # Update config with command line FPS
+    if not hasattr(CustomConfig, 'FPS') and not CustomConfig is None:
+        CustomConfig.FPS = args.fps
+    
+    print(f"Starting ZeroEngine with {args.fps} FPS")
+    app = ZeroEngineApp(args.db)
+    app.run()
 
 if __name__ == "__main__":
     main()
