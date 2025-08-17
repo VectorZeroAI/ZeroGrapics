@@ -112,40 +112,52 @@ class Graphics:
         # Create frame timestamps (in ms)
         self.frames = [i for i in range(0, max_time, 1000 // fps)]
     
+
+
     def project_point(self, point_3d):
-        """Project 3D point to 2D using camera settings from Config"""
-        x, y, z = point_3d
-        
-        # Get camera position from Config
+    """Project 3D point to 2D using camera settings from Config (fixed math)."""
+    xw, yw, zw = point_3d
+
+    # Camera position from config (cx, cy, cz)
         camera_pos = cfg("CAMERA_POSITION")
-        
-        # Translate point relative to camera
-        x -= camera_pos[0]
-        y -= camera_pos[1]
-        z -= camera_pos[2]
-        
-        # Simple perspective projection
-        fov = 45.0  # Field of view in degrees
-        aspect_ratio = Window.width / Window.height if Window.height != 0 else 1.0
-        
-        # Convert FOV to radians and calculate the projection scale
+        cx, cy, cz = camera_pos
+
+    # Transform to camera space.
+    # We assume camera looks toward negative world-z and is located at cz.
+    # So points in front of camera should have positive z_cam = cz - zw
+        x_cam = xw - cx
+        y_cam = yw - cy
+        z_cam = cz - zw
+
+    # Field of view (vertical)
+        fov = 45.0  # degrees (same as before)
         fov_rad = math.radians(fov)
         scale = 1.0 / math.tan(fov_rad / 2.0)
-        
-        # Apply perspective projection
-        if z > 0.1:  # Avoid division by zero or negative z
-            x_proj = x * scale / z
-            y_proj = y * scale / z * aspect_ratio
-        else:
-            # For points too close to camera, use a minimum z
-            x_proj = x * scale / 0.1
-            y_proj = y * scale / 0.1 * aspect_ratio
-        
-        # Convert to screen coordinates
-        x_screen = x_proj * (Window.width / 3) + (Window.width / 2)
-        y_screen = y_proj * (Window.height / 3) + (Window.height / 2)
-        
+
+    # Aspect ratio (width / height)
+        aspect = (Window.width / Window.height) if Window.height != 0 else 1.0
+
+    # Avoid extremely small or negative z that would blow up projection
+        min_z = 0.01
+        if z_cam < min_z:
+            z_cam = min_z
+
+    # Standard perspective projection:
+    # x_ndc = (x_cam * scale) / (z_cam * aspect)
+    # y_ndc = (y_cam * scale) / z_cam
+        x_ndc = (x_cam * scale) / (z_cam * aspect)
+        y_ndc = (y_cam * scale) / z_cam
+
+    # Map normalized device coords (-1..1) to screen coordinates
+        x_screen = (x_ndc + 1.0) * 0.5 * Window.width
+        y_screen = (1.0 - (y_ndc + 1.0) * 0.5) * Window.height
+    # Note: if your Y axes appear flipped, try using:
+    # y_screen = (y_ndc + 1.0) * 0.5 * Window.height
+
         return (x_screen, y_screen)
+
+
+
     
     def transform_3d_to_2d(self, model_3d):
         """
