@@ -3,7 +3,7 @@ import kivy
 kivy.require('2.1.0')
 from kivy.app import App
 from kivy.uix.widget import Widget
-from kivy.graphics import Point, Line, Triangle, Color, InstructionGroup
+from kivy.graphics import Point, Line, Triangle, Color, InstructionGroup, Rectangle
 from kivy.clock import Clock
 from kivy.core.window import Window
 from kivy.config import Config as KivyConfig
