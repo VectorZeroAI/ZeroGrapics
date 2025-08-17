@@ -1,0 +1,6 @@
+Kivy UI plan:
+
+The UI should Work Like this:
+it should have a field where the Json from the LLm should be copied in.
+It should have a Button called "apply" that aplies the instructions from the LLM into the DB via ZeroFiller. 
+It should have a button called "play", that plays the animation.
