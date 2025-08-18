@@ -42,7 +42,7 @@ def cfg(name):
 
 class Graphics:
     """Core graphics engine that manages the animation timeline and rendering logic"""
-    
+
     def __init__(self, db_path):
         """Initialize the graphics engine with database path"""
         self.db_path = db_path
@@ -55,7 +55,7 @@ class Graphics:
         self.audio_player = ZeroAudioPlayer(db_path)
         self.current_tick = 0
         self.widget = None  # Will be set by the Kivy app
-    
+
     def calculate_total_frames(self, fps: int):
         """
         Calculate the amount of frames the animation should have,
@@ -64,54 +64,54 @@ class Graphics:
         """
         # Query the DB for the maximum timestamp across all elements
         max_time = 0
-        
+
         # Check points for movements
         for uuid, point in self.interpreter.points.items():
             if point["movements"]:
                 last_movement = point["movements"][-1]
                 end_time = last_movement[0] + last_movement[1]
                 max_time = max(max_time, end_time)
-        
+
         # Check lines for movements
         for uuid, line in self.interpreter.lines.items():
             if line["movements"]:
                 last_movement = line["movements"][-1]
                 end_time = last_movement[0] + last_movement[1]
                 max_time = max(max_time, end_time)
-        
+
         # Check shapes for movements
         for uuid, shape in self.interpreter.shapes.items():
             if shape["movements"]:
                 last_movement = shape["movements"][-1]
                 end_time = last_movement[0] + last_movement[1]
                 max_time = max(max_time, end_time)
-        
+
         # Check music events
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
-        
+
         # Check music
         cur.execute("SELECT MAX(timestamp_ms) FROM music")
         music_max = cur.fetchone()[0] or 0
         max_time = max(max_time, music_max)
-        
+
         # Check speech
         cur.execute("SELECT MAX(start_time_ms) FROM speech")
         speech_max = cur.fetchone()[0] or 0
         max_time = max(max_time, speech_max)
-        
+
         conn.close()
-        
+
         # Add buffer (1 second)
         max_time += 1000
-        
+
         # Calculate frames
         if max_time <= 0:
             max_time = 10000  # Default to 10 seconds if no data
-        
+
         # Create frame timestamps (in ms)
         self.frames = [i for i in range(0, max_time, 1000 // fps)]
-    
+
 
 
     def project_point(self, point_3d):
@@ -158,7 +158,7 @@ class Graphics:
 
 
 
-    
+
     def transform_3d_to_2d(self, model_3d):
         """
         Transform the 3D model into 2D coordinates that can be rendered.
@@ -168,11 +168,11 @@ class Graphics:
             "lines": {},
             "shapes": {}
         }
-        
+
         # Transform points
         for uuid, point in model_3d["points"].items():
             model_2d["points"][uuid] = self.project_point(point)
-        
+
         # Transform lines
         for uuid, line in model_3d["lines"].items():
             # Transform the sampled points
@@ -183,81 +183,150 @@ class Graphics:
 
 
 
-        
-        
+
+
+
+        # --- Replace the current "Transform shapes" block in transform_3d_to_2d with this ---
+
+        # Helper utilities
+        def pts_equal_3d(a, b, eps=1e-6):
+            return abs(a[0]-b[0]) < eps and abs(a[1]-b[1]) < eps and abs(a[2]-b[2]) < eps
+
+        def remove_adjacent_duplicates(points2d, eps=1e-3):
+            if not points2d:
+                return points2d
+            out = [points2d[0]]
+            for p in points2d[1:]:
+                last = out[-1]
+                if (abs(p[0]-last[0]) > eps) or (abs(p[1]-last[1]) > eps):
+                    out.append(p)
+            # make sure first != last
+            if len(out) > 1:
+                if abs(out[0][0]-out[-1][0]) < eps and abs(out[0][1]-out[-1][1]) < eps:
+                    out.pop()
+            return out
 
         # Transform shapes
         for uuid, shape in model_3d["shapes"].items():
-            # Try to build a polygon boundary that uses curved lines if available.
             boundary_2d = []
 
-            # Prefer explicit line_uuids if provided
+            # explicit line ids preferred
             line_ids = shape.get("line_uuids") or []
 
+            # prepare the list of 3D corner points, in order
+            corner_points_3d = []
+            for p_uuid in shape.get("point_uuids", []):
+                if p_uuid in model_3d["points"]:
+                    corner_points_3d.append(model_3d["points"][p_uuid])
+
+            # Helper to append sampled points for a line while ensuring orientation
+            def append_line_samples_for_edge(a3, b3, line_rec):
+                sampled = line_rec.get("sampled_points", [])
+                if not sampled:
+                    # fallback to endpoints
+                    boundary_2d.append(self.project_point(a3))
+                    return
+                # Determine which end of sampled corresponds to a3 or b3
+                if pts_equal_3d(sampled[0], a3):
+                    seq = sampled
+                elif pts_equal_3d(sampled[-1], a3):
+                    seq = list(reversed(sampled))
+                else:
+                    # If neither sampled endpoint matches exactly, try matching to b3
+                    if pts_equal_3d(sampled[0], b3):
+                        seq = list(reversed(sampled))
+                    elif pts_equal_3d(sampled[-1], b3):
+                        seq = sampled
+                    else:
+                        # Unknown orientation — still use sampled as-is
+                        seq = sampled
+                for p in seq:
+                    boundary_2d.append(self.project_point(p))
+
             if line_ids:
-                # use the lines' sampled_points (if they exist in model_3d["lines"])
+                # Use explicit line list; assume lines are already given in correct order for the shape
                 for lid in line_ids:
                     line_rec = model_3d["lines"].get(lid)
                     if not line_rec:
                         continue
-                    sampled = line_rec.get("sampled_points", [])
-                    for p in sampled:
-                        boundary_2d.append(self.project_point(p))
+                    # NOTE: line_rec['endpoints'] in model_3d may be uuids or positions depending on interpreter.
+                    # We prefer matching using coordinates if available.
+                    # Try to fetch endpoints as coords:
+                    ep = line_rec.get("endpoints", [])
+                    a3 = None
+                    b3 = None
+                    if ep:
+                        # If endpoints are uuids, resolve
+                        if isinstance(ep[0], str) and ep[0] in model_3d["points"]:
+                            a3 = model_3d["points"][ep[0]]
+                        elif isinstance(ep[0], (list, tuple)):
+                            a3 = ep[0]
+                        if len(ep) > 1:
+                            if isinstance(ep[1], str) and ep[1] in model_3d["points"]:
+                                b3 = model_3d["points"][ep[1]]
+                            elif isinstance(ep[1], (list, tuple)):
+                                b3 = ep[1]
+                    # fallback: try to pick from shape corner order
+                    if a3 is None or b3 is None:
+                        # try to find a line whose endpoints match two consecutive corners
+                        pass
+                    # Append sampled points oriented from a3->b3 if possible
+                    if a3 is not None and b3 is not None:
+                        append_line_samples_for_edge(a3, b3, line_rec)
+                    else:
+                        # If we couldn't determine endpoints, just append sampled (best-effort)
+                        for p in line_rec.get("sampled_points", []):
+                            boundary_2d.append(self.project_point(p))
 
             else:
-                # No explicit lines listed: try to auto-detect lines that connect consecutive points
-                # This matches a line by comparing endpoint positions. Use a small tolerance.
-                def pts_equal(a, b, eps=1e-6):
-                    return abs(a[0]-b[0])<eps and abs(a[1]-b[1])<eps and abs(a[2]-b[2])<eps
-
-                pts = []
-                for p_uuid in shape.get("point_uuids", []):
-                    if p_uuid in model_3d["points"]:
-                        pts.append(model_3d["points"][p_uuid])
-
-                # Try to find a line for each consecutive pair (wrap around at end for closed shapes)
-                if len(pts) >= 2:
-                    n = len(pts)
+                # No explicit lines: auto-detect lines for consecutive corners
+                n = len(corner_points_3d)
+                if n >= 2:
                     for i in range(n):
-                        a = pts[i]
-                        b = pts[(i+1) % n]
-                        found = False
+                        a3 = corner_points_3d[i]
+                        b3 = corner_points_3d[(i+1) % n]
+                        # search for a line between a3 and b3
+                        found_line = None
                         for lid, line_rec in model_3d["lines"].items():
-                            ep = line_rec.get("endpoints")
+                            ep = line_rec.get("endpoints", [])
                             if not ep or len(ep) < 2:
                                 continue
-                            # endpoints in model_3d["lines"] are positions (p1,p2)
-                            p_ep_a, p_ep_b = ep[0], ep[1]
-                            if (pts_equal(a, p_ep_a) and pts_equal(b, p_ep_b)) or \
-                               (pts_equal(a, p_ep_b) and pts_equal(b, p_ep_a)):
-                                # use this line's sampled curve
-                                for p in line_rec.get("sampled_points", []):
-                                    boundary_2d.append(self.project_point(p))
-                                found = True
+                            # resolve endpoints to coords if needed
+                            ep0 = ep[0]
+                            ep1 = ep[1]
+                            if isinstance(ep0, str) and ep0 in model_3d["points"]:
+                                ep0 = model_3d["points"][ep0]
+                            if isinstance(ep1, str) and ep1 in model_3d["points"]:
+                                ep1 = model_3d["points"][ep1]
+                            if pts_equal_3d(ep0, a3) and pts_equal_3d(ep1, b3) or \
+                               pts_equal_3d(ep0, b3) and pts_equal_3d(ep1, a3):
+                                found_line = line_rec
                                 break
-                        if not found:
-                            # fallback: add straight edge endpoints (projected)
-                            boundary_2d.append(self.project_point(a))
-                    # If the auto-detection yielded nothing (rare), fallback to point list below
+                        if found_line:
+                            append_line_samples_for_edge(a3, b3, found_line)
+                        else:
+                            # fallback: straight edge endpoints
+                            boundary_2d.append(self.project_point(a3))
 
-            # Final fallback: if still empty, project the raw shape points (straight edges)
+            # Cleanup duplicates and very-close points
+            boundary_2d = remove_adjacent_duplicates(boundary_2d)
+
+            # Final fallback: if empty, use projected corner points
             if not boundary_2d:
-                for point_uuid in shape.get("point_uuids", []):
-                    if point_uuid in model_3d["points"]:
-                        boundary_2d.append(self.project_point(model_3d["points"][point_uuid]))
+                for p3 in corner_points_3d:
+                    boundary_2d.append(self.project_point(p3))
 
             model_2d["shapes"][uuid] = {
                 "points_2d": boundary_2d,
-                "color": shape.get("color", (1.0,1.0,1.0))
+                "color": shape.get("color", (1.0, 1.0, 1.0))
             }
-        
 
 
         return model_2d
 
 
 
-    
+
     def render(self, model_2d):
         """
         Render the 2D model using Kivy graphics.
@@ -265,37 +334,37 @@ class Graphics:
         """
         if not self.widget:
             return
-        
+
         # Clear previous drawings
         self.widget.canvas.clear()
-        
+
         # Set background color
         with self.widget.canvas:
             Color(*cfg("BACKGROUND_COLOR"))
             Rectangle(pos=(0, 0), size=(Window.width, Window.height))
-        
+
         with self.widget.canvas:
             # Draw points
             point_coords = []
             for uuid, point in model_2d["points"].items():
                 x, y = point
                 point_coords.extend([x, y])
-            
+
             if point_coords:
                 Color(*cfg("POINT_COLOR"))
                 Point(points=point_coords, pointsize=cfg("POINT_SIZE"))
-            
+
             # Draw lines
             for uuid, line in model_2d["lines"].items():
                 line_coords = []
                 for point in line["sampled_points"]:
                     x, y = point
                     line_coords.extend([x, y])
-                
+
                 if line_coords:
                     Color(*cfg("LINE_COLOR"))
                     Line(points=line_coords, width=cfg("LINE_THICKNESS"))
-            
+
             # Draw shapes (filled)
             for uuid, shape in model_2d["shapes"].items():
                 points = shape["points_2d"]
@@ -306,7 +375,7 @@ class Graphics:
                     if len(color) == 3:
                         color = (color[0], color[1], color[2], 0.8)
                     Color(*color)
-                    
+
                     # Simple fan triangulation for convex polygons
                     for i in range(1, len(points) - 1):
                         Triangle(points=[
@@ -314,7 +383,7 @@ class Graphics:
                             points[i][0], points[i][1],
                             points[i+1][0], points[i+1][1]
                         ])
-    
+
     def frame_full(self, ms: int):
         """Process a single frame at the specified millisecond timestamp"""
         self.model_3d = self.interpreter.read_full(ms)
@@ -324,38 +393,38 @@ class Graphics:
         self.audio_player.update(ms)
         # Update debug info
         self.current_tick = ms
-    
+
     def play(self, dt=None):
         """
         Do not change this loop. This loop should act as the anchor that the program you create works with.
         """
         if not self.frames:
             self.calculate_total_frames(cfg("FPS"))
-        
+
         if self.current_frame_index >= len(self.frames):
             self.current_frame_index = 0  # Loop back to start
-        
+
         ms = self.frames[self.current_frame_index]
         self.frame_full(ms)
-        
+
         # Update debug label if available
         if hasattr(self.widget, 'update_debug_info'):
             self.widget.update_debug_info(ms, 
                 len(self.model_3d.get('points', [])),
                 len(self.model_3d.get('lines', [])),
                 len(self.model_3d.get('shapes', [])))
-        
+
         self.current_frame_index += 1
 
 class GraphicsWidget(Widget):
     """Kivy widget that handles the actual rendering canvas"""
-    
+
     def __init__(self, graphics, **kwargs):
         super().__init__(**kwargs)
         self.graphics = graphics
         self.graphics.widget = self  # Give Graphics access to the widget's canvas
         self.graphics.calculate_total_frames(cfg("FPS"))
-        
+
         # Create debug label
         from kivy.uix.label import Label
         self.debug_label = Label(
@@ -367,26 +436,26 @@ class GraphicsWidget(Widget):
             font_size=14
         )
         self.add_widget(self.debug_label)
-    
+
     def update_debug_info(self, ms, num_points, num_lines, num_shapes):
         """Update the debug information label"""
         self.debug_label.text = f"Time: {ms}ms | Points: {num_points} | Lines: {num_lines} | Shapes: {num_shapes}"
 
 class ZeroEngineApp(App):
     """Main Kivy application class for the ZeroEngine"""
-    
+
     def __init__(self, db_path, **kwargs):
         super().__init__(**kwargs)
         self.db_path = db_path
         self.graphics = None
-    
+
     def build(self):
         """Build the application UI"""
         # Set window properties
         window_size = cfg("WINDOW_SIZE")
         Window.size = (window_size[0], window_size[1])
         Window.clearcolor = cfg("BACKGROUND_COLOR")
-        
+
         # Create the graphics engine and widget
         self.graphics = Graphics(self.db_path)
         return GraphicsWidget(self.graphics)
@@ -395,28 +464,28 @@ def main():
     """Main entry point for the application"""
     import argparse
     import os
-    
+
     ap = argparse.ArgumentParser(description="ZeroEngine - Kivy-based Graphics and Audio Renderer")
     ap.add_argument("--db", default="graphics.db", help="Path to SQLite DB (default graphics.db)")
     ap.add_argument("--width", type=int, help="Window width")
     ap.add_argument("--height", type=int, help="Window height")
     ap.add_argument("--fps", type=int, default=cfg("FPS"), help=f"Target FPS (default {cfg('FPS')})")
     args = ap.parse_args()
-    
+
     if not os.path.exists(args.db):
         print("DB not found:", args.db)
         print("Run ZeroInit.py to create the DB first.")
         sys.exit(1)
-    
+
     # Set window size if provided
     if args.width and args.height:
         KivyConfig.set('graphics', 'width', str(args.width))
         KivyConfig.set('graphics', 'height', str(args.height))
-    
+
     # Update config with command line FPS
     if not hasattr(CustomConfig, 'FPS') and not CustomConfig is None:
         CustomConfig.FPS = args.fps
-    
+
     print(f"Starting ZeroEngine with {args.fps} FPS")
     app = ZeroEngineApp(args.db)
     app.run()
