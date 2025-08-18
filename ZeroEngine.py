@@ -180,21 +180,83 @@ class Graphics:
             model_2d["lines"][uuid] = {
                 "sampled_points": sampled_points_2d
             }
+
+
+
         
+        
+
         # Transform shapes
         for uuid, shape in model_3d["shapes"].items():
-            # Get the 2D coordinates of the shape's points
-            points_2d = []
-            for point_uuid in shape["point_uuids"]:
-                if point_uuid in model_3d["points"]:
-                    points_2d.append(self.project_point(model_3d["points"][point_uuid]))
-            
+            # Try to build a polygon boundary that uses curved lines if available.
+            boundary_2d = []
+
+            # Prefer explicit line_uuids if provided
+            line_ids = shape.get("line_uuids") or []
+
+            if line_ids:
+                # use the lines' sampled_points (if they exist in model_3d["lines"])
+                for lid in line_ids:
+                    line_rec = model_3d["lines"].get(lid)
+                    if not line_rec:
+                        continue
+                    sampled = line_rec.get("sampled_points", [])
+                    for p in sampled:
+                        boundary_2d.append(self.project_point(p))
+
+            else:
+                # No explicit lines listed: try to auto-detect lines that connect consecutive points
+                # This matches a line by comparing endpoint positions. Use a small tolerance.
+                def pts_equal(a, b, eps=1e-6):
+                    return abs(a[0]-b[0])<eps and abs(a[1]-b[1])<eps and abs(a[2]-b[2])<eps
+
+                pts = []
+                for p_uuid in shape.get("point_uuids", []):
+                    if p_uuid in model_3d["points"]:
+                        pts.append(model_3d["points"][p_uuid])
+
+                # Try to find a line for each consecutive pair (wrap around at end for closed shapes)
+                if len(pts) >= 2:
+                    n = len(pts)
+                    for i in range(n):
+                        a = pts[i]
+                        b = pts[(i+1) % n]
+                        found = False
+                        for lid, line_rec in model_3d["lines"].items():
+                            ep = line_rec.get("endpoints")
+                            if not ep or len(ep) < 2:
+                                continue
+                            # endpoints in model_3d["lines"] are positions (p1,p2)
+                            p_ep_a, p_ep_b = ep[0], ep[1]
+                            if (pts_equal(a, p_ep_a) and pts_equal(b, p_ep_b)) or \
+                               (pts_equal(a, p_ep_b) and pts_equal(b, p_ep_a)):
+                                # use this line's sampled curve
+                                for p in line_rec.get("sampled_points", []):
+                                    boundary_2d.append(self.project_point(p))
+                                found = True
+                                break
+                        if not found:
+                            # fallback: add straight edge endpoints (projected)
+                            boundary_2d.append(self.project_point(a))
+                    # If the auto-detection yielded nothing (rare), fallback to point list below
+
+            # Final fallback: if still empty, project the raw shape points (straight edges)
+            if not boundary_2d:
+                for point_uuid in shape.get("point_uuids", []):
+                    if point_uuid in model_3d["points"]:
+                        boundary_2d.append(self.project_point(model_3d["points"][point_uuid]))
+
             model_2d["shapes"][uuid] = {
-                "points_2d": points_2d,
-                "color": shape["color"]
+                "points_2d": boundary_2d,
+                "color": shape.get("color", (1.0,1.0,1.0))
             }
         
+
+
         return model_2d
+
+
+
     
     def render(self, model_2d):
         """
