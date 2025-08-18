@@ -115,7 +115,7 @@ class Graphics:
 
 
     def project_point(self, point_3d):
-    """Project 3D point to 2D using camera settings from Config (fixed math)."""
+        """Project 3D point to 2D using camera settings from Config (fixed math)."""
         xw, yw, zw = point_3d
 
     # Camera position from config (cx, cy, cz)
